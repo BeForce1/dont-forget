@@ -19,6 +19,10 @@
 
 A quick wheel click still works normally in other apps when no notes are following you. Apps that use wheel-drag themselves, like SolidWorks and Blender, are left alone. You can edit that list from the tray icon under *Ignored apps…*.
 
+## Control panel
+
+Double-click `control.cmd` (needs PowerShell 7) to start, stop or restart the app, toggle start with Windows, change settings, or rebuild it. `control.cmd -Status` prints the current state.
+
 ## Build
 
 Run `cargo build --release` with Rust. The `x86_64-pc-windows-gnu` toolchain works without Visual Studio. Settings are stored in `%APPDATA%\DontForget\settings.ini`.
