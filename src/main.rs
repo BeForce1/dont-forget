@@ -133,7 +133,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
         WM_SELECT_END => overlay::finish(point(wparam, lparam)),
         WM_DELETE_NOTE => {
             if is_note(wparam as HWND) {
-                DestroyWindow(wparam as HWND);
+                note::close(wparam as HWND);
             }
         }
         WM_DROP_CLICK => {
@@ -250,7 +250,7 @@ fn pin_followers() {
 
 pub fn clear_all() {
     for h in with_app(|a| a.notes.clone()) {
-        unsafe { DestroyWindow(h) };
+        note::close(h);
     }
 }
 
@@ -267,7 +267,8 @@ fn update_armed() {
     }
 }
 
-/// Stacks following notes below-right of the cursor, flipping at screen edges.
+/// Stacks following notes below-right of the cursor, flipping at screen edges. Each note
+/// glides a fraction of the way there per frame, so a fresh snip flies over to the cursor.
 /// Holding Shift or having a menu open freezes them so they can be reached.
 fn layout_followers() {
     let list = followers();
@@ -283,14 +284,16 @@ fn layout_followers() {
     }
     unsafe {
         const GAP: i32 = 6;
-        let sizes: Vec<(i32, i32)> = list
+        const GLIDE: f32 = 0.38;
+        let rects: Vec<RECT> = list
             .iter()
             .map(|&h| {
                 let mut r: RECT = zeroed();
                 GetWindowRect(h, &mut r);
-                (r.right - r.left, r.bottom - r.top)
+                r
             })
             .collect();
+        let sizes: Vec<(i32, i32)> = rects.iter().map(|r| (r.right - r.left, r.bottom - r.top)).collect();
         let width = sizes.iter().map(|s| s.0).max().unwrap_or(0);
         let height = sizes.iter().map(|s| s.1).sum::<i32>() + GAP * (sizes.len() as i32 - 1);
         let c = cursor();
@@ -308,8 +311,15 @@ fn layout_followers() {
         }
         x = x.max(wa.left);
         y = y.max(wa.top);
-        for (&h, &(_, nh)) in list.iter().zip(&sizes) {
-            SetWindowPos(h, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        let glide = |from: i32, to: i32| {
+            let d = (to - from) as f32;
+            if d.abs() <= 1.5 { to } else { from + (d * GLIDE).round() as i32 }
+        };
+        for ((&h, &(_, nh)), r) in list.iter().zip(&sizes).zip(&rects) {
+            let (nx, ny) = (glide(r.left, x), glide(r.top, y));
+            if nx != r.left || ny != r.top {
+                SetWindowPos(h, null_mut(), nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
             y += nh + GAP;
         }
     }

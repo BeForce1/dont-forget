@@ -5,7 +5,7 @@ use windows_sys::Win32::{
     Foundation::*,
     Graphics::{Dwm::*, Gdi::*},
     System::{DataExchange::*, Memory::*},
-    UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+    UI::{HiDpi::GetDpiForWindow, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 
 pub const BORDER: i32 = 2;
@@ -15,6 +15,14 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const CLASS: &str = "DontForgetNote";
 const OPACITIES: [u32; 5] = [100, 85, 70, 50, 30];
 const SIZES: [u32; 5] = [50, 75, 100, 150, 200];
+
+// Animation timing. The timer only runs while something is moving.
+const ANIM_TIMER: usize = 1;
+const FRAME_MS: f32 = 15.0;
+const APPEAR_MS: f32 = 260.0;
+const CLOSE_MS: f32 = 170.0;
+const PULSE_MS: f32 = 280.0;
+const BUTTON_MS: f32 = 130.0;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -36,6 +44,13 @@ struct Note {
     dragged: Cell<bool>,
     down_screen: Cell<POINT>,
     down_origin: Cell<POINT>,
+    // animation progress, each 0..=1
+    appear: Cell<f32>,
+    closing: Cell<Option<f32>>,
+    pulse: Cell<f32>,
+    button: Cell<f32>,
+    button_hot: Cell<f32>,
+    animating: Cell<bool>,
 }
 
 fn get(hwnd: HWND) -> Option<&'static Note> {
@@ -78,6 +93,12 @@ pub fn create(image: Dib, x: i32, y: i32, edge: (u32, u32)) -> HWND {
         dragged: Cell::new(false),
         down_screen: Cell::new(origin),
         down_origin: Cell::new(origin),
+        appear: Cell::new(0.0),
+        closing: Cell::new(None),
+        pulse: Cell::new(1.0),
+        button: Cell::new(0.0),
+        button_hot: Cell::new(0.0),
+        animating: Cell::new(false),
     });
     unsafe {
         let (class, title) = (wide(CLASS), wide("Don't Forget note"));
@@ -90,53 +111,154 @@ pub fn create(image: Dib, x: i32, y: i32, edge: (u32, u32)) -> HWND {
             null_mut(), null_mut(), null_mut(), null(),
         );
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(note) as isize);
-        apply_style(hwnd);
+        apply_style(hwnd); // starts fully transparent; the pop-in animation fades it in
         // Windows 11 rounded corners with a matching border that follows the curve.
         let round = DWMWCP_ROUND;
         DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, (&round as *const i32).cast(), 4);
         DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, (&edge.1 as *const u32).cast(), 4);
+        apply_geometry(hwnd, true);
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        animate(hwnd);
         hwnd
     }
 }
 
 pub fn set_mode(hwnd: HWND, mode: Mode) {
     let Some(n) = get(hwnd) else { return };
-    n.mode.set(mode);
+    let was = n.mode.replace(mode);
+    if mode == Mode::Pinned && was != Mode::Pinned {
+        n.pulse.set(0.0); // little "thunk" when it lands
+        animate(hwnd);
+    }
     n.click_through.set(mode != Mode::Pinned);
     apply_style(hwnd);
     crate::on_mode_changed(hwnd, mode);
 }
 
+/// Fades and shrinks the note away, then destroys it.
+pub fn close(hwnd: HWND) {
+    let Some(n) = get(hwnd) else { return };
+    if n.closing.get().is_some() {
+        return;
+    }
+    n.closing.set(Some(0.0));
+    n.click_through.set(true);
+    apply_style(hwnd);
+    crate::note_destroyed(hwnd); // stop following and stop counting it right away
+    animate(hwnd);
+}
+
 /// Following notes let clicks pass through, except while frozen (Shift held or a menu open).
 pub fn set_click_through(hwnd: HWND, on: bool) {
     if let Some(n) = get(hwnd) {
-        if n.click_through.replace(on) != on {
+        if n.closing.get().is_none() && n.click_through.replace(on) != on {
             apply_style(hwnd);
         }
     }
 }
 
+fn ease_out_cubic(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
+fn ease_out_back(t: f32) -> f32 {
+    let (c1, c3) = (1.70158, 2.70158);
+    1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
+}
+
+/// Current animated (scale, alpha) multipliers.
+fn anim_values(n: &Note) -> (f32, f32) {
+    let a = n.appear.get();
+    let mut scale = 0.8 + 0.2 * ease_out_back(a);
+    let mut alpha = ease_out_cubic((a * 1.8).min(1.0));
+    if let Some(c) = n.closing.get() {
+        scale *= 1.0 - 0.15 * c * c;
+        alpha *= 1.0 - ease_out_cubic(c);
+    }
+    scale *= 1.0 + 0.06 * (n.pulse.get() * std::f32::consts::PI).sin();
+    (scale, alpha)
+}
+
+fn animate(hwnd: HWND) {
+    if let Some(n) = get(hwnd) {
+        if !n.animating.replace(true) {
+            unsafe { SetTimer(hwnd, ANIM_TIMER, FRAME_MS as u32, None) };
+        }
+    }
+}
+
+fn step(cell: &Cell<f32>, target: f32, ms: f32) -> bool {
+    let v = cell.get();
+    if v == target {
+        return false;
+    }
+    let d = FRAME_MS / ms;
+    cell.set(if v < target { (v + d).min(target) } else { (v - d).max(target) });
+    true
+}
+
+fn tick(hwnd: HWND, n: &Note) {
+    let mut moved = step(&n.appear, 1.0, APPEAR_MS);
+    moved |= step(&n.pulse, 1.0, PULSE_MS);
+    if let Some(c) = n.closing.get() {
+        let c = (c + FRAME_MS / CLOSE_MS).min(1.0);
+        n.closing.set(Some(c));
+        if c >= 1.0 {
+            unsafe { DestroyWindow(hwnd) };
+            return;
+        }
+        moved = true;
+    }
+    let mut repaint = step(&n.button, if n.hover.get() && n.closing.get().is_none() { 1.0 } else { 0.0 }, BUTTON_MS);
+    repaint |= step(&n.button_hot, if n.close_hot.get() { 1.0 } else { 0.0 }, BUTTON_MS);
+    if moved {
+        apply_geometry(hwnd, true);
+        apply_style(hwnd);
+    }
+    if repaint {
+        unsafe { InvalidateRect(hwnd, null(), 0) };
+    }
+    if !moved && !repaint {
+        n.animating.set(false);
+        unsafe { KillTimer(hwnd, ANIM_TIMER) };
+    }
+}
+
 fn apply_style(hwnd: HWND) {
     let Some(n) = get(hwnd) else { return };
+    let alpha = anim_values(n).1 * n.opacity.get() as f32 / 100.0;
     unsafe {
         let mut ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 | WS_EX_LAYERED;
         if n.click_through.get() { ex |= WS_EX_TRANSPARENT } else { ex &= !WS_EX_TRANSPARENT }
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex as isize);
-        SetLayeredWindowAttributes(hwnd, 0, (n.opacity.get() * 255 / 100) as u8, LWA_ALPHA);
+        SetLayeredWindowAttributes(hwnd, 0, (alpha * 255.0).round() as u8, LWA_ALPHA);
+    }
+}
+
+/// Sizes the window from the note's zoom and the current animation scale,
+/// keeping either its center (animations) or its top-left corner (zooming) in place.
+fn apply_geometry(hwnd: HWND, keep_center: bool) {
+    let Some(n) = get(hwnd) else { return };
+    let s = n.scale.get() * anim_values(n).0;
+    let w = (n.image.w as f32 * s).round().max(1.0) as i32 + 2 * BORDER;
+    let h = (n.image.h as f32 * s).round().max(1.0) as i32 + 2 * BORDER;
+    unsafe {
+        let mut r: RECT = zeroed();
+        GetWindowRect(hwnd, &mut r);
+        let (cw, ch) = (r.right - r.left, r.bottom - r.top);
+        if cw == w && ch == h {
+            return;
+        }
+        let (x, y) = if keep_center { (r.left + (cw - w) / 2, r.top + (ch - h) / 2) } else { (r.left, r.top) };
+        SetWindowPos(hwnd, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        InvalidateRect(hwnd, null(), 0);
     }
 }
 
 fn set_scale(hwnd: HWND, scale: f32) {
     let Some(n) = get(hwnd) else { return };
-    let s = scale.clamp(0.2, 4.0);
-    n.scale.set(s);
-    let w = (n.image.w as f32 * s).round() as i32 + 2 * BORDER;
-    let h = (n.image.h as f32 * s).round() as i32 + 2 * BORDER;
-    unsafe {
-        SetWindowPos(hwnd, null_mut(), 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-        InvalidateRect(hwnd, null(), 0);
-    }
+    n.scale.set(scale.clamp(0.2, 4.0));
+    apply_geometry(hwnd, false);
 }
 
 fn client_size(hwnd: HWND) -> (i32, i32) {
@@ -145,17 +267,36 @@ fn client_size(hwnd: HWND) -> (i32, i32) {
     (rc.right, rc.bottom)
 }
 
+fn dpi_scale(hwnd: HWND) -> f32 {
+    unsafe { GetDpiForWindow(hwnd) as f32 / 96.0 }
+}
+
+/// The close button: a rounded square, inset the same distance from the top and right edges.
 fn close_rect(hwnd: HWND) -> RECT {
-    rect(client_size(hwnd).0 - 24, 6, 18, 18)
+    let k = dpi_scale(hwnd);
+    let (size, margin) = ((22.0 * k).round() as i32, (BORDER as f32 + 6.0 * k).round() as i32);
+    rect(client_size(hwnd).0 - margin - size, margin, size, size)
 }
 
-fn shows_close(hwnd: HWND, n: &Note) -> bool {
+fn has_room_for_close(hwnd: HWND) -> bool {
     let (w, h) = client_size(hwnd);
-    n.hover.get() && w > 52 && h > 32
+    let r = close_rect(hwnd);
+    w > (r.right - r.left) * 2 + 24 && h > (r.bottom - r.top) + 16
 }
 
-fn in_rect(r: &RECT, x: i32, y: i32) -> bool {
-    x >= r.left && x < r.right && y >= r.top && y < r.bottom
+fn over_close(hwnd: HWND, x: i32, y: i32) -> bool {
+    let r = close_rect(hwnd);
+    has_room_for_close(hwnd) && x >= r.left && x < r.right && y >= r.top && y < r.bottom
+}
+
+/// Blends two 0xAARRGGBB colors and multiplies the result's alpha by `fade`.
+fn mix(a: u32, b: u32, t: f32, fade: f32) -> u32 {
+    let ch = |shift: u32| {
+        let (x, y) = (((a >> shift) & 0xFF) as f32, ((b >> shift) & 0xFF) as f32);
+        x + (y - x) * t
+    };
+    let alpha = (ch(24) * fade).round() as u32;
+    alpha << 24 | (ch(16).round() as u32) << 16 | (ch(8).round() as u32) << 8 | ch(0).round() as u32
 }
 
 fn paint(hwnd: HWND, n: &Note) {
@@ -182,14 +323,25 @@ fn paint(hwnd: HWND, n: &Note) {
 
         let g = Gfx::new(bdc.dc);
         g.round_corners(n.edge.0, BORDER, BORDER, iw, ih, IMAGE_RADIUS);
-        if shows_close(hwnd, n) {
+
+        let shown = ease_out_cubic(n.button.get());
+        if shown > 0.01 && has_room_for_close(hwnd) {
             let r = close_rect(hwnd);
-            g.fill_ellipse(if n.close_hot.get() { 0xF0E5484D } else { 0xD82B2B2E }, r.left, r.top, 18, 18);
-            g.round_rect(0x50FFFFFF, 1.0, r.left, r.top, 18, 18, 9); // keeps it visible on dark snips
-            let i = 6;
-            g.line(0xFFFFFFFF, 2.0, r.left + i, r.top + i, r.right - i, r.bottom - i);
-            g.line(0xFFFFFFFF, 2.0, r.right - i, r.top + i, r.left + i, r.bottom - i);
+            let k = dpi_scale(hwnd);
+            let full = (r.right - r.left) as f32;
+            // grows in from 80% around its own center
+            let size = full * (0.8 + 0.2 * shown);
+            let (cx, cy) = (r.left as f32 + full / 2.0, r.top as f32 + full / 2.0);
+            let (x, y) = (cx - size / 2.0, cy - size / 2.0);
+            let hot = ease_out_cubic(n.button_hot.get());
+            g.fill_round_rect_f(mix(0xE0232326, 0xF5E5484D, hot, shown), x, y, size, size, 6.0 * k);
+            g.round_rect_f(mix(0x55FFFFFF, 0x00FFFFFF, hot, shown), 1.0, x + 0.5, y + 0.5, size - 1.0, size - 1.0, 5.5 * k);
+            let arm = size * 0.19;
+            let white = mix(0xFFFFFFFF, 0xFFFFFFFF, 0.0, shown);
+            g.line_f(white, 1.8 * k, cx - arm, cy - arm, cx + arm, cy + arm);
+            g.line_f(white, 1.8 * k, cx + arm, cy - arm, cx - arm, cy + arm);
         }
+        drop(g);
         BitBlt(hdc, 0, 0, cw, ch, bdc.dc, 0, 0, SRCCOPY);
         EndPaint(hwnd, &ps);
     }
@@ -237,9 +389,7 @@ fn menu(hwnd: HWND) {
             }
             20..=24 => set_scale(hwnd, SIZES[cmd - 20] as f32 / 100.0),
             30 => copy_image(&n.image),
-            40 => {
-                DestroyWindow(hwnd);
-            }
+            40 => close(hwnd),
             41 => crate::clear_all(),
             _ => {}
         }
@@ -297,12 +447,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_MOUSEACTIVATE => return MA_NOACTIVATE as LRESULT,
         WM_ERASEBKGND => return 1,
         WM_PAINT => paint(hwnd, n),
+        WM_TIMER if wparam == ANIM_TIMER => tick(hwnd, n),
         WM_DESTROY => crate::note_destroyed(hwnd),
         WM_MOUSEMOVE => {
             if !n.hover.replace(true) {
                 let mut t = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
                 TrackMouseEvent(&mut t);
-                InvalidateRect(hwnd, null(), 0);
+                animate(hwnd);
             }
             if n.left_down.get() {
                 let p = crate::cursor();
@@ -319,15 +470,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
             }
             let (x, y) = mouse_pos(lparam);
-            let hot = shows_close(hwnd, n) && in_rect(&close_rect(hwnd), x, y);
-            if n.close_hot.replace(hot) != hot {
-                InvalidateRect(hwnd, null(), 0);
+            if n.close_hot.replace(over_close(hwnd, x, y)) != n.close_hot.get() {
+                animate(hwnd);
             }
         }
         WM_MOUSELEAVE => {
             n.hover.set(false);
             n.close_hot.set(false);
-            InvalidateRect(hwnd, null(), 0);
+            animate(hwnd);
         }
         WM_LBUTTONDOWN => {
             SetCapture(hwnd);
@@ -343,8 +493,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 ReleaseCapture();
                 if !n.dragged.get() {
                     let (x, y) = mouse_pos(lparam);
-                    if shows_close(hwnd, n) && in_rect(&close_rect(hwnd), x, y) {
-                        DestroyWindow(hwnd);
+                    if over_close(hwnd, x, y) {
+                        close(hwnd);
                     } else {
                         menu(hwnd);
                     }

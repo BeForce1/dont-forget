@@ -101,6 +101,7 @@ impl Gfx {
             let mut g = null_mut();
             GdipCreateFromHDC(dc, &mut g);
             GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+            GdipSetPixelOffsetMode(g, PixelOffsetModeHalf); // shapes line up with pixel edges
             Gfx(g)
         }
     }
@@ -112,14 +113,48 @@ impl Gfx {
     }
 
     fn add_round_figure(path: *mut GpPath, x: i32, y: i32, w: i32, h: i32, radius: i32) {
-        let d = (radius * 2).min(w).min(h).max(1);
+        Self::add_round_figure_f(path, x as f32, y as f32, w as f32, h as f32, radius as f32);
+    }
+
+    fn add_round_figure_f(path: *mut GpPath, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+        let d = (radius * 2.0).min(w).min(h).max(1.0);
         unsafe {
             GdipStartPathFigure(path);
-            GdipAddPathArcI(path, x, y, d, d, 180.0, 90.0);
-            GdipAddPathArcI(path, x + w - d, y, d, d, 270.0, 90.0);
-            GdipAddPathArcI(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
-            GdipAddPathArcI(path, x, y + h - d, d, d, 90.0, 90.0);
+            GdipAddPathArc(path, x, y, d, d, 180.0, 90.0);
+            GdipAddPathArc(path, x + w - d, y, d, d, 270.0, 90.0);
+            GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
+            GdipAddPathArc(path, x, y + h - d, d, d, 90.0, 90.0);
             GdipClosePathFigure(path);
+        }
+    }
+
+    pub fn fill_round_rect_f(&self, argb: u32, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+        let mut path = null_mut();
+        unsafe { GdipCreatePath(FillModeAlternate, &mut path) };
+        Self::add_round_figure_f(path, x, y, w, h, radius);
+        self.fill_path(argb, path);
+    }
+
+    pub fn round_rect_f(&self, argb: u32, width: f32, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+        unsafe {
+            let mut path = null_mut();
+            GdipCreatePath(FillModeAlternate, &mut path);
+            Self::add_round_figure_f(path, x, y, w, h, radius);
+            let pen = Self::pen(argb, width);
+            GdipDrawPath(self.0, pen, path);
+            GdipDeletePen(pen);
+            GdipDeletePath(path);
+        }
+    }
+
+    /// Line with round caps at fractional coordinates.
+    pub fn line_f(&self, argb: u32, width: f32, x1: f32, y1: f32, x2: f32, y2: f32) {
+        unsafe {
+            let pen = Self::pen(argb, width);
+            GdipSetPenStartCap(pen, LineCapRound);
+            GdipSetPenEndCap(pen, LineCapRound);
+            GdipDrawLine(self.0, pen, x1, y1, x2, y2);
+            GdipDeletePen(pen);
         }
     }
 
@@ -162,23 +197,6 @@ impl Gfx {
         }
         Self::add_round_figure(path, x, y, w, h, radius);
         self.fill_path(argb, path);
-    }
-
-    pub fn fill_ellipse(&self, argb: u32, x: i32, y: i32, w: i32, h: i32) {
-        unsafe {
-            let mut brush = null_mut();
-            GdipCreateSolidFill(argb, &mut brush);
-            GdipFillEllipseI(self.0, brush.cast(), x, y, w, h);
-            GdipDeleteBrush(brush.cast());
-        }
-    }
-
-    pub fn line(&self, argb: u32, width: f32, x1: i32, y1: i32, x2: i32, y2: i32) {
-        unsafe {
-            let pen = Self::pen(argb, width);
-            GdipDrawLineI(self.0, pen, x1, y1, x2, y2);
-            GdipDeletePen(pen);
-        }
     }
 }
 

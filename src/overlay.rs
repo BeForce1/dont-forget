@@ -15,6 +15,7 @@ pub const BLUE: (u32, u32) = (0xFF3498FF, 0x00FF9834);
 struct Overlay {
     hwnd: HWND,
     vs: RECT,
+    alpha: u32, // fades in over a few frames
     start: POINT,
     cur: POINT,
     font: HFONT,
@@ -95,17 +96,18 @@ pub fn begin(start: POINT) {
 
         let class = wide(CLASS);
         let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             class.as_ptr(),
             null(),
             WS_POPUP,
             x, y, w, h,
             null_mut(), null_mut(), null_mut(), null(),
         );
+        SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
         let cur = crate::cursor();
         OVERLAY.with(|o| {
             *o.borrow_mut() = Some(Overlay {
-                hwnd, vs: rect(x, y, w, h), start, cur, font,
+                hwnd, vs: rect(x, y, w, h), alpha: 0, start, cur, font,
                 shot_dc, dim_dc, back_dc, shot, _dim: dim, _back: back,
             })
         });
@@ -140,6 +142,10 @@ fn track() {
     OVERLAY.with(|o| {
         let mut o = o.borrow_mut();
         let Some(ov) = o.as_mut() else { return };
+        if ov.alpha < 255 {
+            ov.alpha = (ov.alpha + 50).min(255);
+            unsafe { SetLayeredWindowAttributes(ov.hwnd, 0, ov.alpha as u8, LWA_ALPHA) };
+        }
         let p = crate::cursor();
         if p.x == ov.cur.x && p.y == ov.cur.y {
             return;
