@@ -5,6 +5,7 @@ mod hook;
 mod note;
 mod overlay;
 mod settings;
+mod sites;
 
 use hook::*;
 use note::Mode;
@@ -65,6 +66,10 @@ pub fn cursor() -> POINT {
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "--probe-url") {
+        sites::probe();
+        return;
+    }
     unsafe {
         let mutex_name = wide("DontForget.SingleInstance");
         let _mutex = CreateMutexW(null(), 1, mutex_name.as_ptr());
@@ -106,6 +111,7 @@ fn main() {
         });
         add_tray();
         hook::start();
+        sites::start();
         if first_run {
             show_help();
             with_app(|a| {
@@ -187,6 +193,7 @@ fn apply_menu_theme() {
 
 fn apply_settings(s: &Settings) {
     HOLD_MS.store(s.hold_ms, Ordering::Relaxed);
+    *sites::SITES.lock().unwrap() = s.sites.clone();
     *IGNORED.lock().unwrap() = s
         .ignored
         .iter()

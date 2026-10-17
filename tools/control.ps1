@@ -49,7 +49,7 @@ $AfterModes = [ordered]@{ follow = 'Follow my mouse'; drop = 'Follow until I cli
 $HoldTimes = 150, 250, 400, 600
 
 function Read-Settings {
-    $s = [ordered]@{ after_capture = 'follow'; hold_ms = '250'; ignored_apps = 'SLDWORKS,blender,FreeCAD,acad'; shown_intro = '0' }
+    $s = [ordered]@{ after_capture = 'follow'; hold_ms = '250'; ignored_apps = 'SLDWORKS,blender,FreeCAD,acad'; ignored_sites = ''; shown_intro = '0' }
     if (Test-Path $SettingsPath) {
         foreach ($line in Get-Content $SettingsPath) {
             if ($line -match '^\s*([a-z_]+)\s*=\s*([^;]*)') { $s[$Matches[1]] = $Matches[2].Trim() }
@@ -65,6 +65,7 @@ function Save-Settings($s) {
         "after_capture=$($s.after_capture)   ; follow | drop | stay"
         "hold_ms=$($s.hold_ms)   ; how long to hold the wheel before snipping"
         "ignored_apps=$($s.ignored_apps)   ; process names where the wheel is left alone"
+        "ignored_sites=$($s.ignored_sites)   ; websites where it is off, e.g. youtube.com"
         "shown_intro=$($s.shown_intro)"
     )
     [IO.File]::WriteAllText($SettingsPath, ($lines -join "`n") + "`n")   # LF, like the app writes
@@ -153,23 +154,155 @@ function Step-Hold($dir) {
     Set-Setting hold_ms $HoldTimes[[math]::Clamp($i + $dir, 0, $HoldTimes.Count - 1)]
 }
 
-function Edit-Ignored {
-    $apps = [System.Collections.Generic.List[string]]((Read-Settings).ignored_apps -split ',' | Where-Object { $_ })
-    [Console]::CursorVisible = $true
-    Clear-Host
-    Write-Host "`n  $($C.Bold)Ignored apps$($C.Reset)  $($C.Dim)the wheel is left alone over these (process names, no .exe)$($C.Reset)`n"
-    while ($true) {
-        Write-Host "  $($C.White)$($apps -join ', ')$($C.Reset)"
-        $in = Read-Host "  Type +name to add, -name to remove, Enter when done"
-        if (-not $in) { break }
-        foreach ($t in $in -split '[ ,]+' | Where-Object { $_ }) {
-            $name = $t.Substring(1) -replace '\.exe$', ''
-            if ($t[0] -eq '+' -and $name -and -not ($apps -contains $name)) { $apps.Add($name) }
-            elseif ($t[0] -eq '-') { $apps.RemoveAll({ param($a) $a -eq $name }) | Out-Null }
+function Get-AppCatalog {
+    # Start menu shortcuts + registered App Paths + windows that are open right now.
+    $found = @{}
+    $add = {
+        param($exe, $name)
+        # some shortcuts point at a launcher (SOLIDWORKS: i386_SldWorks.exe starts SLDWORKS.exe)
+        $stem = [IO.Path]::GetFileNameWithoutExtension("$exe") -replace '^i386_', ''
+        if (-not $stem -or $stem -match '^(unins\d*|uninstall|setup|update|updater|crashpad_handler)$') { return }
+        if (-not $found.ContainsKey($stem.ToLower())) {
+            $found[$stem.ToLower()] = [pscustomobject]@{ Name = $(if ($name) { $name } else { $stem }); Exe = $stem }
         }
     }
+    $shell = New-Object -ComObject WScript.Shell
+    $menus = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs", "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
+    foreach ($lnk in Get-ChildItem $menus -Recurse -Filter *.lnk -ErrorAction SilentlyContinue) {
+        if ($lnk.BaseName -match 'uninstall|readme|help|website|documentation|release notes') { continue }
+        $target = try { $shell.CreateShortcut($lnk.FullName).TargetPath } catch { '' }
+        if ($target -like '*.exe') { & $add $target $lnk.BaseName }
+    }
+    foreach ($hive in 'HKLM', 'HKCU') {
+        Get-ChildItem "${hive}:\Software\Microsoft\Windows\CurrentVersion\App Paths" -ErrorAction SilentlyContinue |
+            ForEach-Object { & $add $_.PSChildName $null }
+    }
+    foreach ($p in Get-Process | Where-Object MainWindowHandle -ne 0) {
+        $desc = try { $p.MainModule.FileVersionInfo.FileDescription } catch { $null }
+        & $add $p.ProcessName $desc
+    }
+    @($found.Values)
+}
+
+function Get-NormalizedSite($text) {
+    ("$text".Trim().ToLower() -replace '^https?://', '' -replace '^www\.', '').TrimEnd('/')
+}
+
+# Full-screen picker: "Apps" tab (alphabetical, searchable, check to skip) and "Websites" tab.
+function Edit-Exceptions {
     [Console]::CursorVisible = $false
-    Set-Setting ignored_apps ($apps -join ',')
+    Clear-Host
+    Write-Host "`n  $($C.Dim)Looking for your apps…$($C.Reset)"
+    $s = Read-Settings
+    $checked = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($x in $s.ignored_apps -split ',' | Where-Object { $_ }) { [void]$checked.Add($x) }
+    $catalog = [System.Collections.Generic.List[object]]@(Get-AppCatalog)
+    foreach ($x in @($checked)) {
+        if (-not ($catalog | Where-Object Exe -eq $x)) { $catalog.Add([pscustomobject]@{ Name = $x; Exe = $x }) }
+    }
+    $catalog = @($catalog | Sort-Object Name)
+    $sites = [System.Collections.Generic.List[string]]@($s.ignored_sites -split ',' | Where-Object { $_ })
+
+    $tab = 0; $query = ''; $siteText = ''; $sel = 0; $top = 0; $done = $false
+    Clear-Host
+    while (-not $done) {
+        $rows = [math]::Max(5, [Console]::WindowHeight - 11)
+        if ($tab -eq 0) {
+            $list = @(if ($query) { $catalog | Where-Object { $_.Name -like "*$query*" -or $_.Exe -like "*$query*" } } else { $catalog })
+            $canAdd = [bool]$query -and -not ($catalog | Where-Object Exe -eq $query)
+            $count = $list.Count + [int]$canAdd
+        } else {
+            $count = $sites.Count
+        }
+        $sel = [math]::Max(0, [math]::Min($sel, $count - 1))
+        if ($sel -lt $top) { $top = $sel }
+        if ($sel -ge $top + $rows) { $top = $sel - $rows + 1 }
+
+        $out = [System.Text.StringBuilder]::new()
+        $line = { param($t) [void]$out.Append("$t$E[K`n") }
+        $tabNames = 'Apps', 'Websites'
+        $tabs = for ($i = 0; $i -lt 2; $i++) {
+            if ($i -eq $tab) { "$($C.Sel)$($C.Amber)$($C.Bold) $($tabNames[$i]) $($C.Reset)" } else { "$($C.Dim) $($tabNames[$i]) $($C.Reset)" }
+        }
+        & $line ''
+        & $line "  $($C.Bold)Where Don't Forget stays off$($C.Reset)   $($tabs -join ' ')   $($C.Dim)Tab switches$($C.Reset)"
+        & $line "  $($C.Dim)$('─' * 70)$($C.Reset)"
+        if ($tab -eq 0) {
+            & $line "  Search: $($C.White)$query$($C.Amber)▏$($C.Reset)   $($C.Dim)$($list.Count) of $($catalog.Count) apps · $($checked.Count) off$($C.Reset)"
+        } else {
+            & $line "  Add a site: $($C.White)$siteText$($C.Amber)▏$($C.Reset)   $($C.Dim)e.g. youtube.com or github.com/settings$($C.Reset)"
+        }
+        & $line ''
+        for ($r = $top; $r -lt [math]::Min($count, $top + $rows); $r++) {
+            $on = $r -eq $sel
+            $cursor = if ($on) { "$($C.Sel)$($C.Amber) › " } else { '   ' }
+            $bg = if ($on) { $C.Sel } else { '' }
+            if ($tab -eq 1) {
+                $text = "$($C.Blue)◆$($C.Reset)$bg $($C.White)$($sites[$r])"
+            } elseif ($r -lt $list.Count) {
+                $app = $list[$r]
+                $mark = if ($checked.Contains($app.Exe)) { "$($C.Green)✔" } else { "$($C.Dim)○" }
+                $name = if ($app.Name.Length -gt 40) { $app.Name.Substring(0, 39) + '…' } else { $app.Name.PadRight(40) }
+                $text = "$mark$($C.Reset)$bg $($C.White)$name $($C.Dim)$($app.Exe)"
+            } else {
+                $text = "$($C.Amber)+$($C.Reset)$bg $($C.White)Add `"$query`" as a process name"
+            }
+            & $line "  $cursor$text $($C.Reset)"
+        }
+        if ($count -eq 0) {
+            $empty = if ($tab -eq 0) { 'No apps match.' } else { 'No websites yet. Type one above and press Enter.' }
+            & $line "     $($C.Dim)$empty$($C.Reset)"
+        }
+        & $line ''
+        $help = if ($tab -eq 0) { 'type to search · ↑↓ move · Space/Enter switch off/on · Tab websites · Esc save' }
+                else { 'type a site, Enter adds · ↑↓ move · Delete removes · Tab apps · Esc save' }
+        & $line "  $($C.Dim)$help$($C.Reset)"
+        [void]$out.Append("$E[J")
+        [Console]::SetCursorPosition(0, 0)
+        [Console]::Write($out.ToString())
+
+        $k = [Console]::ReadKey($true)
+        $key = "$($k.Key)"
+        if ($key -eq 'Escape') { $done = $true }
+        elseif ($key -eq 'Tab') { $tab = 1 - $tab; $sel = 0; $top = 0 }
+        elseif ($key -eq 'UpArrow') { $sel-- }
+        elseif ($key -eq 'DownArrow') { $sel++ }
+        elseif ($key -eq 'PageUp') { $sel -= $rows }
+        elseif ($key -eq 'PageDown') { $sel += $rows }
+        elseif ($key -eq 'Home') { $sel = 0 }
+        elseif ($key -eq 'End') { $sel = $count - 1 }
+        elseif ($key -eq 'Backspace') {
+            if ($tab -eq 0 -and $query) { $query = $query.Substring(0, $query.Length - 1); $sel = 0; $top = 0 }
+            elseif ($tab -eq 1 -and $siteText) { $siteText = $siteText.Substring(0, $siteText.Length - 1) }
+        }
+        elseif ($key -eq 'Delete') { if ($tab -eq 1 -and $count -gt 0) { $sites.RemoveAt($sel) } }
+        elseif ($tab -eq 0 -and $key -in 'Enter', 'Spacebar') {
+            if ($sel -lt $list.Count) {
+                $exe = $list[$sel].Exe
+                if (-not $checked.Remove($exe)) { [void]$checked.Add($exe) }
+            } elseif ($canAdd) {
+                $catalog = @(@($catalog) + [pscustomobject]@{ Name = $query; Exe = $query } | Sort-Object Name)
+                [void]$checked.Add($query)
+            }
+        }
+        elseif ($tab -eq 1 -and $key -eq 'Enter') {
+            $site = Get-NormalizedSite $siteText
+            if ($site -and -not $sites.Contains($site)) { $sites.Add($site) }
+            $siteText = ''
+        }
+        else {
+            $ch = $k.KeyChar
+            if ([char]::IsLetterOrDigit($ch) -or "$ch" -match '[.\-_/:]') {
+                if ($tab -eq 0) { $query += $ch; $sel = 0; $top = 0 } else { $siteText += $ch }
+            }
+        }
+    }
+    $s = Read-Settings
+    $s.ignored_apps = (@($checked) | Sort-Object) -join ','
+    $s.ignored_sites = $sites -join ','
+    Save-Settings $s
+    $msg = "Saved: $($checked.Count) app$(if ($checked.Count -ne 1) { 's' }), $($sites.Count) website$(if ($sites.Count -ne 1) { 's' })."
+    if (Get-AppProcess) { Say "$msg Restart the app to apply." $C.Amber } else { Say $msg }
     Clear-Host
 }
 
@@ -200,7 +333,10 @@ $Items = @(
     @{ Key = 'W'; Label = { param($s) "Start with Windows   $(if ($s.Startup) { "$($C.Green)on" } else { "$($C.Dim)off" })$($C.Reset)" }; Run = { Switch-Startup }; Step = { Switch-Startup } }
     @{ Key = 'A'; Label = { param($s) "After a snip         $($C.Blue)‹ $($AfterModes[$s.Settings.after_capture]) ›$($C.Reset)" }; Run = { Step-After 1 }; Step = { param($d) Step-After $d } }
     @{ Key = 'H'; Label = { param($s) "Hold time            $($C.Blue)‹ $($s.Settings.hold_ms) ms ›$($C.Reset)" }; Run = { Step-Hold 1 }; Step = { param($d) Step-Hold $d } }
-    @{ Key = 'I'; Label = { param($s) "Ignored apps         $($C.Dim)$(@($s.Settings.ignored_apps -split ',' | Where-Object { $_ }).Count) apps$($C.Reset)" }; Run = { Edit-Ignored } }
+    @{ Key = 'I'; Label = { param($s)
+            $a = @($s.Settings.ignored_apps -split ',' | Where-Object { $_ }).Count
+            $w = @($s.Settings.ignored_sites -split ',' | Where-Object { $_ }).Count
+            "Apps & sites to skip $($C.Dim)$a app$(if ($a -ne 1) { 's' }) · $w site$(if ($w -ne 1) { 's' })$($C.Reset)" }; Run = { Edit-Exceptions } }
     @{ Key = 'E'; Label = { 'Open settings file' }; Run = { Start-Process notepad.exe $SettingsPath; Say 'Opened in Notepad.' } }
     @{ Key = 'B'; Label = { 'Rebuild from source' }; Run = { Build-App } }
     @{ Key = 'G'; Label = { 'Open GitHub page' }; Run = { Start-Process $Repo; Say 'Opened in your browser.' } }
@@ -240,7 +376,8 @@ function Render($s, $sel) {
 if ($Status) {
     $s = Get-State
     Show-Status $s
-    "  start with Windows: $(if ($s.Startup) { 'on' } else { 'off' }) · after a snip: $($AfterModes[$s.Settings.after_capture]) · hold: $($s.Settings.hold_ms) ms · ignored: $($s.Settings.ignored_apps)"
+    "  start with Windows: $(if ($s.Startup) { 'on' } else { 'off' }) · after a snip: $($AfterModes[$s.Settings.after_capture]) · hold: $($s.Settings.hold_ms) ms"
+    "  skipped apps: $($s.Settings.ignored_apps) · skipped sites: $(if ($s.Settings.ignored_sites) { $s.Settings.ignored_sites } else { 'none' })"
     return
 }
 

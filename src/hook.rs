@@ -114,7 +114,7 @@ fn handle(h: &mut Hook, msg: u32, pt: POINT) -> bool {
                 post(WM_DELETE_NOTE, root as usize, 0);
                 return true;
             }
-            if is_ignored(h, root) {
+            if is_ignored(h, root) || root as isize == crate::sites::BLOCKED_WINDOW.load(Ordering::Relaxed) {
                 return false;
             }
             h.state = State::Pending;
@@ -198,7 +198,7 @@ fn is_ignored(h: &mut Hook, hwnd: HWND) -> bool {
     ignored.iter().any(|a| a == name)
 }
 
-fn process_name(pid: u32) -> String {
+pub fn process_name(pid: u32) -> String {
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if process.is_null() {

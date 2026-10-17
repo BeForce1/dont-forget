@@ -12,6 +12,8 @@ pub struct Settings {
     pub hold_ms: u32,
     /// Process names (no .exe) where the wheel button is left alone, e.g. CAD apps that orbit with it.
     pub ignored: Vec<String>,
+    /// Websites (host, optionally with a path) where it is off, e.g. "youtube.com".
+    pub sites: Vec<String>,
     pub shown_intro: bool,
 }
 
@@ -21,6 +23,7 @@ impl Default for Settings {
             after: After::Follow,
             hold_ms: 250,
             ignored: ["SLDWORKS", "blender", "FreeCAD", "acad"].map(String::from).to_vec(),
+            sites: Vec::new(),
             shown_intro: false,
         }
     }
@@ -49,6 +52,9 @@ impl Settings {
                 "ignored_apps" => {
                     s.ignored = value.split(',').map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect()
                 }
+                "ignored_sites" => {
+                    s.sites = value.split(',').map(crate::sites::normalize).filter(|a| !a.is_empty()).collect()
+                }
                 "shown_intro" => s.shown_intro = value == "1",
                 _ => {}
             }
@@ -67,9 +73,11 @@ impl Settings {
              after_capture={after}   ; follow | drop | stay\n\
              hold_ms={}   ; how long to hold the wheel before snipping\n\
              ignored_apps={}   ; process names where the wheel is left alone\n\
+             ignored_sites={}   ; websites where it is off, e.g. youtube.com\n\
              shown_intro={}\n",
             self.hold_ms,
             self.ignored.join(","),
+            self.sites.join(","),
             self.shown_intro as u8
         );
         let p = path();
