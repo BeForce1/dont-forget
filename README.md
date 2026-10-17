@@ -1,12 +1,8 @@
 # Don't Forget
 
-**A screenshot that follows your mouse.** Hold the mouse wheel, drag over part of the screen, and that piece stays next to your cursor while you work.
+**A screenshot that follows your mouse, so you never forget the details.** Hold the mouse wheel and drag over part of the screen. That piece stays next to your cursor while you work.
 
 ![Snipping a problem, carrying it to the edge of the screen, and pinning it there while reading the solution](docs/pin.gif)
-
-## Why I made this
-
-In class I give Claude a problem and then read through its solution. Halfway down I've forgotten the problem itself: what was the set again, and what exactly did part (c) ask? So I scroll back up, lose my place, and scroll down again. I wanted the problem to come with me while I read, so I made this.
 
 ## How to use it
 
@@ -23,8 +19,14 @@ In class I give Claude a problem and then read through its solution. Halfway dow
 
 A quick wheel click still works normally in other apps when no notes are following you. Apps that use wheel-drag themselves, like SolidWorks and Blender, are left alone. You can edit that list from the tray icon under *Ignored apps…*.
 
-## Install
+## Build
 
-Windows 10/11. It's a single ~400 KB `.exe` with nothing else to install, and it uses about 2.5 MB of RAM and no CPU while idle.
+Run `cargo build --release` with Rust. The `x86_64-pc-windows-gnu` toolchain works without Visual Studio. Settings are stored in `%APPDATA%\DontForget\settings.ini`.
 
-To build it, run `cargo build --release` with Rust. The `x86_64-pc-windows-gnu` toolchain works without Visual Studio. Settings are stored in `%APPDATA%\DontForget\settings.ini`.
+## Requirements
+
+- **System:** Windows 10 or 11, 64-bit. On Windows 10, notes have square corners instead of rounded ones.
+- **Mouse:** any mouse with a clickable scroll wheel (middle button).
+- **CPU:** any 64-bit processor. It uses no CPU while idle.
+- **Memory:** about 2.5 MB of RAM.
+- **Disk:** a single ~400 KB `.exe`, with nothing else to install.
