@@ -29,8 +29,15 @@ impl Default for Settings {
     }
 }
 
+/// Windows: %APPDATA%\DontForget\settings.ini, Linux: $XDG_CONFIG_HOME (or ~/.config)/dont-forget/settings.ini
 pub fn path() -> PathBuf {
-    PathBuf::from(env::var_os("APPDATA").unwrap_or_default()).join("DontForget").join("settings.ini")
+    if cfg!(windows) {
+        return PathBuf::from(env::var_os("APPDATA").unwrap_or_default()).join("DontForget").join("settings.ini");
+    }
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".config"));
+    base.join("dont-forget").join("settings.ini")
 }
 
 impl Settings {
@@ -53,7 +60,7 @@ impl Settings {
                     s.ignored = value.split(',').map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect()
                 }
                 "ignored_sites" => {
-                    s.sites = value.split(',').map(crate::sites::normalize).filter(|a| !a.is_empty()).collect()
+                    s.sites = value.split(',').map(crate::common::sites::normalize).filter(|a| !a.is_empty()).collect()
                 }
                 "shown_intro" => s.shown_intro = value == "1",
                 _ => {}

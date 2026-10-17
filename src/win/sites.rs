@@ -1,7 +1,8 @@
 // Turns Don't Forget off on chosen websites. A background thread watches the foreground
 // browser's address bar through UI Automation, only re-reading it when the window or its
 // title changes, and publishes that window as BLOCKED_WINDOW for the mouse hook.
-use crate::hook::process_name;
+use super::hook::process_name;
+use crate::common::sites::{matches, BROWSERS};
 use std::{
     sync::{atomic::*, Mutex},
     thread,
@@ -21,30 +22,7 @@ pub static SITES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// The browser window currently showing an ignored site (0 if none).
 pub static BLOCKED_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
-const BROWSERS: [&str; 11] = [
-    "chrome", "msedge", "brave", "firefox", "opera", "vivaldi", "arc", "zen", "librewolf", "waterfox", "floorp",
-];
 
-/// "https://www.YouTube.com/watch" -> "youtube.com/watch"
-pub fn normalize(s: &str) -> String {
-    let s = s.trim().to_lowercase();
-    let s = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://")).unwrap_or(&s);
-    let s = s.strip_prefix("www.").unwrap_or(s);
-    s.trim_end_matches('/').to_string()
-}
-
-/// A site matches its own host, its subdomains, and (if it has a path) anything under that path.
-pub fn matches(url: &str, sites: &[String]) -> bool {
-    let url = normalize(url);
-    let host = url.split(['/', '?', '#']).next().unwrap_or("");
-    sites.iter().any(|site| {
-        if site.contains('/') {
-            url.starts_with(site.as_str())
-        } else {
-            host == site || host.ends_with(&format!(".{site}"))
-        }
-    })
-}
 
 fn is_browser(hwnd: isize) -> bool {
     let mut pid = 0;
@@ -134,19 +112,3 @@ pub fn probe() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn site_matching() {
-        let sites = vec![normalize("YouTube.com"), normalize("https://github.com/settings/")];
-        assert!(matches("youtube.com/watch?v=1", &sites));
-        assert!(matches("https://www.youtube.com", &sites));
-        assert!(matches("m.youtube.com/feed", &sites));
-        assert!(!matches("notyoutube.com", &sites));
-        assert!(!matches("youtube.com.evil.net/x", &sites));
-        assert!(matches("github.com/settings/profile", &sites));
-        assert!(!matches("github.com/BeForce1", &sites));
-    }
-}

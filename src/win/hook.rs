@@ -114,7 +114,7 @@ fn handle(h: &mut Hook, msg: u32, pt: POINT) -> bool {
                 post(WM_DELETE_NOTE, root as usize, 0);
                 return true;
             }
-            if is_ignored(h, root) || root as isize == crate::sites::BLOCKED_WINDOW.load(Ordering::Relaxed) {
+            if is_ignored(h, root) || root as isize == super::sites::BLOCKED_WINDOW.load(Ordering::Relaxed) {
                 return false;
             }
             h.state = State::Pending;

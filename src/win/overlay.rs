@@ -1,5 +1,5 @@
 // Full-screen frozen screenshot, dimmed, with the selected area shown bright.
-use crate::{gfx::*, wide};
+use super::{gfx::*, wide};
 use std::{cell::RefCell, mem::zeroed, ptr::{null, null_mut}};
 use windows_sys::Win32::{
     Foundation::*,
@@ -104,7 +104,7 @@ pub fn begin(start: POINT) {
             null_mut(), null_mut(), null_mut(), null(),
         );
         SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
-        let cur = crate::cursor();
+        let cur = super::cursor();
         OVERLAY.with(|o| {
             *o.borrow_mut() = Some(Overlay {
                 hwnd, vs: rect(x, y, w, h), alpha: 0, start, cur, font,
@@ -128,7 +128,7 @@ pub fn finish(end: POINT) {
     unsafe { DestroyWindow(ov.hwnd) };
     drop(ov);
     if let Some(dib) = crop {
-        crate::add_note(dib, screen_rect, additive);
+        super::add_note(dib, screen_rect, additive);
     }
 }
 
@@ -146,7 +146,7 @@ fn track() {
             ov.alpha = (ov.alpha + 50).min(255);
             unsafe { SetLayeredWindowAttributes(ov.hwnd, 0, ov.alpha as u8, LWA_ALPHA) };
         }
-        let p = crate::cursor();
+        let p = super::cursor();
         if p.x == ov.cur.x && p.y == ov.cur.y {
             return;
         }

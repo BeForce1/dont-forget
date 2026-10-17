@@ -1,5 +1,6 @@
 // One floating note: a snipped piece of the screen that is pinned somewhere or rides next to the cursor.
-use crate::{gfx::*, wide};
+use super::{gfx::*, wide};
+use crate::common::anim::{self, *};
 use std::{cell::Cell, mem::{size_of, zeroed}, ptr::{null, null_mut}};
 use windows_sys::Win32::{
     Foundation::*,
@@ -16,13 +17,8 @@ const CLASS: &str = "DontForgetNote";
 const OPACITIES: [u32; 5] = [100, 85, 70, 50, 30];
 const SIZES: [u32; 5] = [50, 75, 100, 150, 200];
 
-// Animation timing. The timer only runs while something is moving.
+// The animation timer only runs while something is moving.
 const ANIM_TIMER: usize = 1;
-const FRAME_MS: f32 = 15.0;
-const APPEAR_MS: f32 = 260.0;
-const CLOSE_MS: f32 = 170.0;
-const PULSE_MS: f32 = 280.0;
-const BUTTON_MS: f32 = 130.0;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -132,7 +128,7 @@ pub fn set_mode(hwnd: HWND, mode: Mode) {
     }
     n.click_through.set(mode != Mode::Pinned);
     apply_style(hwnd);
-    crate::on_mode_changed(hwnd, mode);
+    super::on_mode_changed(hwnd, mode);
 }
 
 /// Fades and shrinks the note away, then destroys it.
@@ -144,7 +140,7 @@ pub fn close(hwnd: HWND) {
     n.closing.set(Some(0.0));
     n.click_through.set(true);
     apply_style(hwnd);
-    crate::note_destroyed(hwnd); // stop following and stop counting it right away
+    super::note_destroyed(hwnd); // stop following and stop counting it right away
     animate(hwnd);
 }
 
@@ -157,26 +153,10 @@ pub fn set_click_through(hwnd: HWND, on: bool) {
     }
 }
 
-fn ease_out_cubic(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(3)
-}
-
-fn ease_out_back(t: f32) -> f32 {
-    let (c1, c3) = (1.70158, 2.70158);
-    1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
-}
 
 /// Current animated (scale, alpha) multipliers.
 fn anim_values(n: &Note) -> (f32, f32) {
-    let a = n.appear.get();
-    let mut scale = 0.8 + 0.2 * ease_out_back(a);
-    let mut alpha = ease_out_cubic((a * 1.8).min(1.0));
-    if let Some(c) = n.closing.get() {
-        scale *= 1.0 - 0.15 * c * c;
-        alpha *= 1.0 - ease_out_cubic(c);
-    }
-    scale *= 1.0 + 0.06 * (n.pulse.get() * std::f32::consts::PI).sin();
-    (scale, alpha)
+    anim::note_transform(n.appear.get(), n.closing.get(), n.pulse.get())
 }
 
 fn animate(hwnd: HWND) {
@@ -188,13 +168,10 @@ fn animate(hwnd: HWND) {
 }
 
 fn step(cell: &Cell<f32>, target: f32, ms: f32) -> bool {
-    let v = cell.get();
-    if v == target {
-        return false;
-    }
-    let d = FRAME_MS / ms;
-    cell.set(if v < target { (v + d).min(target) } else { (v - d).max(target) });
-    true
+    let mut v = cell.get();
+    let moved = anim::step(&mut v, target, ms);
+    cell.set(v);
+    moved
 }
 
 fn tick(hwnd: HWND, n: &Note) {
@@ -375,7 +352,7 @@ fn menu(hwnd: HWND) {
         add(m, 0, 40, "Delete\tWheel click");
         add(m, 0, 41, "Delete all notes");
 
-        let cmd = crate::track_menu(m);
+        let cmd = super::track_menu(m);
         DestroyMenu(m);
         if IsWindow(hwnd) == 0 {
             return;
@@ -390,7 +367,7 @@ fn menu(hwnd: HWND) {
             20..=24 => set_scale(hwnd, SIZES[cmd - 20] as f32 / 100.0),
             30 => copy_image(&n.image),
             40 => close(hwnd),
-            41 => crate::clear_all(),
+            41 => super::clear_all(),
             _ => {}
         }
     }
@@ -422,7 +399,7 @@ fn copy_image(img: &Dib) {
             dst[row * w..(row + 1) * w].copy_from_slice(&src[from..from + w]);
         }
         GlobalUnlock(mem);
-        if OpenClipboard(crate::hidden()) != 0 {
+        if OpenClipboard(super::hidden()) != 0 {
             EmptyClipboard();
             SetClipboardData(8 /* CF_DIB */, mem);
             CloseClipboard();
@@ -448,7 +425,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_ERASEBKGND => return 1,
         WM_PAINT => paint(hwnd, n),
         WM_TIMER if wparam == ANIM_TIMER => tick(hwnd, n),
-        WM_DESTROY => crate::note_destroyed(hwnd),
+        WM_DESTROY => super::note_destroyed(hwnd),
         WM_MOUSEMOVE => {
             if !n.hover.replace(true) {
                 let mut t = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
@@ -456,7 +433,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 animate(hwnd);
             }
             if n.left_down.get() {
-                let p = crate::cursor();
+                let p = super::cursor();
                 let d = n.down_screen.get();
                 if !n.dragged.get() && ((p.x - d.x).abs() > 3 || (p.y - d.y).abs() > 3) {
                     n.dragged.set(true);
@@ -483,7 +460,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             SetCapture(hwnd);
             n.left_down.set(true);
             n.dragged.set(false);
-            n.down_screen.set(crate::cursor());
+            n.down_screen.set(super::cursor());
             let mut r: RECT = zeroed();
             GetWindowRect(hwnd, &mut r);
             n.down_origin.set(POINT { x: r.left, y: r.top });
