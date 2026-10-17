@@ -111,21 +111,57 @@ impl Gfx {
         pen
     }
 
-    pub fn round_rect(&self, argb: u32, width: f32, x: i32, y: i32, w: i32, h: i32, radius: i32) {
+    fn add_round_figure(path: *mut GpPath, x: i32, y: i32, w: i32, h: i32, radius: i32) {
+        let d = (radius * 2).min(w).min(h).max(1);
         unsafe {
-            let d = radius * 2;
-            let mut path = null_mut();
-            GdipCreatePath(FillModeAlternate, &mut path);
+            GdipStartPathFigure(path);
             GdipAddPathArcI(path, x, y, d, d, 180.0, 90.0);
             GdipAddPathArcI(path, x + w - d, y, d, d, 270.0, 90.0);
             GdipAddPathArcI(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
             GdipAddPathArcI(path, x, y + h - d, d, d, 90.0, 90.0);
             GdipClosePathFigure(path);
+        }
+    }
+
+    fn fill_path(&self, argb: u32, path: *mut GpPath) {
+        unsafe {
+            let mut brush = null_mut();
+            GdipCreateSolidFill(argb, &mut brush);
+            GdipFillPath(self.0, brush.cast(), path);
+            GdipDeleteBrush(brush.cast());
+            GdipDeletePath(path);
+        }
+    }
+
+    pub fn round_rect(&self, argb: u32, width: f32, x: i32, y: i32, w: i32, h: i32, radius: i32) {
+        unsafe {
+            let mut path = null_mut();
+            GdipCreatePath(FillModeAlternate, &mut path);
+            Self::add_round_figure(path, x, y, w, h, radius);
             let pen = Self::pen(argb, width);
             GdipDrawPath(self.0, pen, path);
             GdipDeletePen(pen);
             GdipDeletePath(path);
         }
+    }
+
+    pub fn fill_round_rect(&self, argb: u32, x: i32, y: i32, w: i32, h: i32, radius: i32) {
+        let mut path = null_mut();
+        unsafe { GdipCreatePath(FillModeAlternate, &mut path) };
+        Self::add_round_figure(path, x, y, w, h, radius);
+        self.fill_path(argb, path);
+    }
+
+    /// Paints the four corner wedges outside a rounded rectangle, so whatever is
+    /// underneath (e.g. an image) appears to have smooth rounded corners.
+    pub fn round_corners(&self, argb: u32, x: i32, y: i32, w: i32, h: i32, radius: i32) {
+        let mut path = null_mut();
+        unsafe {
+            GdipCreatePath(FillModeAlternate, &mut path);
+            GdipAddPathRectangleI(path, x, y, w, h);
+        }
+        Self::add_round_figure(path, x, y, w, h, radius);
+        self.fill_path(argb, path);
     }
 
     pub fn fill_ellipse(&self, argb: u32, x: i32, y: i32, w: i32, h: i32) {
@@ -199,11 +235,10 @@ pub fn draw_label(dc: HDC, font: HFONT, text: &str, x: i32, y: i32) {
         let old = SelectObject(dc, font);
         let mut m = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         DrawTextW(dc, wide.as_mut_ptr(), wide.len() as i32, &mut m, DT_CALCRECT | DT_SINGLELINE);
-        let (tw, th) = (m.right + 12, m.bottom + 6);
-        let mut bx = rect(x, (y - th - 6).max(0), tw, th);
-        let brush = CreateSolidBrush(0x00181414);
-        FillRect(dc, &bx, brush);
-        DeleteObject(brush);
+        let (tw, th) = (m.right + m.bottom + 4, m.bottom + 8);
+        let mut bx = rect(x, (y - th - 8).max(0), tw, th);
+        // rounded pill, like modern snipping tools
+        Gfx::new(dc).fill_round_rect(0xEB1C1C1E, bx.left, bx.top, tw, th, th / 2);
         SetBkMode(dc, TRANSPARENT as i32);
         SetTextColor(dc, 0x00FFFFFF);
         DrawTextW(dc, wide.as_mut_ptr(), wide.len() as i32, &mut bx, DT_CENTER | DT_VCENTER | DT_SINGLELINE);

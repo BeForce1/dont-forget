@@ -8,7 +8,9 @@ use windows_sys::Win32::{
     UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 
-pub const BORDER: i32 = 3;
+pub const BORDER: i32 = 2;
+/// Corner radius of the screenshot inside the frame.
+const IMAGE_RADIUS: i32 = 6;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const CLASS: &str = "DontForgetNote";
 const OPACITIES: [u32; 5] = [100, 85, 70, 50, 30];
@@ -23,7 +25,7 @@ pub enum Mode {
 
 struct Note {
     image: Dib,
-    edge: u32,
+    edge: (u32, u32), // (GDI+ ARGB, GDI COLORREF)
     scale: Cell<f32>,
     opacity: Cell<u32>,
     mode: Cell<Mode>,
@@ -60,7 +62,7 @@ pub fn register(inst: HINSTANCE) {
     }
 }
 
-pub fn create(image: Dib, x: i32, y: i32, edge: u32) -> HWND {
+pub fn create(image: Dib, x: i32, y: i32, edge: (u32, u32)) -> HWND {
     let (w, h) = (image.w + 2 * BORDER, image.h + 2 * BORDER);
     let origin = POINT { x: 0, y: 0 };
     let note = Box::new(Note {
@@ -92,7 +94,7 @@ pub fn create(image: Dib, x: i32, y: i32, edge: u32) -> HWND {
         // Windows 11 rounded corners with a matching border that follows the curve.
         let round = DWMWCP_ROUND;
         DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, (&round as *const i32).cast(), 4);
-        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, (&edge as *const u32).cast(), 4);
+        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, (&edge.1 as *const u32).cast(), 4);
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         hwnd
     }
@@ -163,7 +165,7 @@ fn paint(hwnd: HWND, n: &Note) {
         let (cw, ch) = client_size(hwnd);
         let back = Dib::new(cw, ch);
         let bdc = MemDc::new(back.bmp);
-        let brush = CreateSolidBrush(n.edge);
+        let brush = CreateSolidBrush(n.edge.1);
         FillRect(bdc.dc, &rect(0, 0, cw, ch), brush);
         DeleteObject(brush);
 
@@ -178,11 +180,13 @@ fn paint(hwnd: HWND, n: &Note) {
         }
         drop(src);
 
+        let g = Gfx::new(bdc.dc);
+        g.round_corners(n.edge.0, BORDER, BORDER, iw, ih, IMAGE_RADIUS);
         if shows_close(hwnd, n) {
             let r = close_rect(hwnd);
-            let g = Gfx::new(bdc.dc);
-            g.fill_ellipse(if n.close_hot.get() { 0xE6D22D2D } else { 0xAA000000 }, r.left, r.top, 18, 18);
-            let i = 5;
+            g.fill_ellipse(if n.close_hot.get() { 0xF0E5484D } else { 0xD82B2B2E }, r.left, r.top, 18, 18);
+            g.round_rect(0x50FFFFFF, 1.0, r.left, r.top, 18, 18, 9); // keeps it visible on dark snips
+            let i = 6;
             g.line(0xFFFFFFFF, 2.0, r.left + i, r.top + i, r.right - i, r.bottom - i);
             g.line(0xFFFFFFFF, 2.0, r.right - i, r.top + i, r.left + i, r.bottom - i);
         }

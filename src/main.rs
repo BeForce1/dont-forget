@@ -18,7 +18,7 @@ use std::{
 use windows_sys::Win32::{
     Foundation::*,
     Graphics::Gdi::*,
-    System::{LibraryLoader::GetModuleHandleW, Registry::*, Threading::CreateMutexW},
+    System::{LibraryLoader::*, Registry::*, Threading::CreateMutexW},
     UI::{HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
 };
 
@@ -73,6 +73,7 @@ fn main() {
         }
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         gfx::gdiplus_start();
+        apply_menu_theme();
 
         let inst = GetModuleHandleW(null());
         note::register(inst);
@@ -149,6 +150,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
             WM_RBUTTONUP | WM_CONTEXTMENU => tray_menu(),
             _ => {}
         },
+        WM_SETTINGCHANGE => apply_menu_theme(), // light/dark switch
         WM_RELOAD_SETTINGS => {
             let s = Settings::load();
             apply_settings(&s);
@@ -158,6 +160,29 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
         _ => return DefWindowProcW(hwnd, msg, wparam, lparam),
     }
     0
+}
+
+/// Windows 11-style dark popup menus while Windows is in dark mode. Uses the undocumented
+/// uxtheme ordinals 135 (SetPreferredAppMode) and 136 (FlushMenuThemes) that Explorer itself
+/// uses; if they are missing the menus simply stay light.
+fn apply_menu_theme() {
+    unsafe {
+        let (key, name) = (wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"), wide("AppsUseLightTheme"));
+        let (mut light, mut size) = (1u32, 4u32);
+        RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_DWORD, null_mut(), (&mut light as *mut u32).cast(), &mut size);
+        let ux = LoadLibraryW(wide("uxtheme.dll").as_ptr());
+        if ux.is_null() {
+            return;
+        }
+        if let Some(f) = GetProcAddress(ux, 135 as *const u8) {
+            let set_mode: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(f);
+            set_mode(if light == 0 { 2 } else { 3 }); // ForceDark / ForceLight
+        }
+        if let Some(f) = GetProcAddress(ux, 136 as *const u8) {
+            let flush: unsafe extern "system" fn() = std::mem::transmute(f);
+            flush();
+        }
+    }
 }
 
 fn apply_settings(s: &Settings) {
@@ -173,7 +198,7 @@ pub fn add_note(image: gfx::Dib, area: RECT, additive: bool) {
     if !additive {
         pin_followers();
     }
-    let edge = if additive { overlay::BLUE.1 } else { overlay::GREEN.1 };
+    let edge = if additive { overlay::BLUE } else { overlay::GREEN };
     let hwnd = note::create(image, area.left - note::BORDER, area.top - note::BORDER, edge);
     NOTES.lock().unwrap().push(hwnd as isize);
     let after = with_app(|a| {
