@@ -14,6 +14,9 @@ pub struct Settings {
     pub ignored: Vec<String>,
     /// Websites (host, optionally with a path) where it is off, e.g. "youtube.com".
     pub sites: Vec<String>,
+    /// Stay out of games (detected automatically) unless they are listed in `allowed_games`.
+    pub block_games: bool,
+    pub allowed_games: Vec<String>,
     pub shown_intro: bool,
 }
 
@@ -24,6 +27,8 @@ impl Default for Settings {
             hold_ms: 250,
             ignored: ["SLDWORKS", "blender", "FreeCAD", "acad"].map(String::from).to_vec(),
             sites: Vec::new(),
+            block_games: true,
+            allowed_games: Vec::new(),
             shown_intro: false,
         }
     }
@@ -62,6 +67,10 @@ impl Settings {
                 "ignored_sites" => {
                     s.sites = value.split(',').map(crate::common::sites::normalize).filter(|a| !a.is_empty()).collect()
                 }
+                "block_games" => s.block_games = value != "0",
+                "allowed_games" => {
+                    s.allowed_games = value.split(',').map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect()
+                }
                 "shown_intro" => s.shown_intro = value == "1",
                 _ => {}
             }
@@ -81,10 +90,14 @@ impl Settings {
              hold_ms={}   ; how long to hold the wheel before snipping\n\
              ignored_apps={}   ; process names where the wheel is left alone\n\
              ignored_sites={}   ; websites where it is off, e.g. youtube.com\n\
+             block_games={}   ; 1 = off in games unless listed in allowed_games\n\
+             allowed_games={}   ; games where it still works\n\
              shown_intro={}\n",
             self.hold_ms,
             self.ignored.join(","),
             self.sites.join(","),
+            self.block_games as u8,
+            self.allowed_games.join(","),
             self.shown_intro as u8
         );
         let p = path();

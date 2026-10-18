@@ -1,9 +1,10 @@
 // Global low-level mouse hook on its own thread so a busy UI thread never stalls the system mouse.
 // Wheel-button press: quick click -> replayed to the app (or releases following notes),
 // hold or drag -> screen selection. Results are posted to the hidden main window.
+use crate::common::games::{is_game_path, same_app};
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     mem::{size_of, zeroed},
     path::Path,
     ptr::{null, null_mut},
@@ -12,7 +13,7 @@ use std::{
 use windows_sys::Win32::{
     Foundation::*,
     System::{LibraryLoader::GetModuleHandleW, Threading::*},
-    UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+    UI::{Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
 };
 
 pub const WM_SELECT_BEGIN: u32 = WM_APP + 1;
@@ -29,6 +30,11 @@ pub static PAUSED: AtomicBool = AtomicBool::new(false);
 pub static HOLD_MS: AtomicU32 = AtomicU32::new(250);
 pub static NOTES: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 pub static IGNORED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Stay out of games unless they're in ALLOWED_GAMES.
+pub static BLOCK_GAMES: AtomicBool = AtomicBool::new(true);
+pub static ALLOWED_GAMES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Lowercase exe paths of the games Windows itself has recognized (Game Bar's list).
+pub static KNOWN_GAMES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 static THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
 const MAGIC: usize = 0x4446_5247; // marks our own replayed clicks
@@ -46,7 +52,13 @@ struct Hook {
     eat_middle_up: bool,
     eat_left_up: bool,
     timer: usize,
-    names: HashMap<u32, String>,
+    procs: HashMap<u32, Proc>,
+}
+
+/// What we know about the process behind a window, cached per process id.
+struct Proc {
+    name: String,
+    game: bool,
 }
 
 thread_local! {
@@ -56,7 +68,7 @@ thread_local! {
         eat_middle_up: false,
         eat_left_up: false,
         timer: 0,
-        names: HashMap::new(),
+        procs: HashMap::new(),
     });
 }
 
@@ -156,7 +168,8 @@ fn handle(h: &mut Hook, msg: u32, pt: POINT) -> bool {
             }
         }
         WM_LBUTTONDOWN => {
-            if DROP_ARMED.load(Ordering::Relaxed) && h.state == State::Idle && !is_note(root_at(pt)) {
+            let root = root_at(pt);
+            if DROP_ARMED.load(Ordering::Relaxed) && h.state == State::Idle && !is_note(root) && !is_ignored(h, root) {
                 h.eat_left_up = true;
                 post_point(WM_DROP_CLICK, pt);
                 return true;
@@ -187,18 +200,43 @@ fn root_at(p: POINT) -> HWND {
     unsafe { GetAncestor(WindowFromPoint(p), GA_ROOT) }
 }
 
+/// Should this press go straight to the app? Ignored apps, and games unless allowed.
 fn is_ignored(h: &mut Hook, hwnd: HWND) -> bool {
-    let ignored = IGNORED.lock().unwrap();
-    if ignored.is_empty() {
-        return false;
-    }
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-    let name = h.names.entry(pid).or_insert_with(|| process_name(pid));
-    ignored.iter().any(|a| a == name)
+    let p = h.procs.entry(pid).or_insert_with(|| {
+        let path = process_path(pid);
+        let known = KNOWN_GAMES.lock().unwrap().as_ref().is_some_and(|k| k.contains(&path.to_lowercase()));
+        Proc { name: stem(&path), game: known || is_game_path(&path) }
+    });
+    if IGNORED.lock().unwrap().iter().any(|a| same_app(a, &p.name)) {
+        return true;
+    }
+    if !BLOCK_GAMES.load(Ordering::Relaxed) || ALLOWED_GAMES.lock().unwrap().iter().any(|a| same_app(a, &p.name)) {
+        return false;
+    }
+    p.game || exclusive_fullscreen(hwnd)
+}
+
+/// A DirectX game in exclusive full-screen is in front (and is the window under the mouse).
+fn exclusive_fullscreen(hwnd: HWND) -> bool {
+    let mut state = 0;
+    unsafe {
+        SHQueryUserNotificationState(&mut state) == 0
+            && state == QUNS_RUNNING_D3D_FULL_SCREEN
+            && GetAncestor(GetForegroundWindow(), GA_ROOT) == hwnd
+    }
+}
+
+fn stem(path: &str) -> String {
+    Path::new(path).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default()
 }
 
 pub fn process_name(pid: u32) -> String {
+    stem(&process_path(pid))
+}
+
+fn process_path(pid: u32) -> String {
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if process.is_null() {
@@ -211,9 +249,36 @@ pub fn process_name(pid: u32) -> String {
         if ok == 0 {
             return String::new();
         }
-        let full = String::from_utf16_lossy(&buf[..len as usize]);
-        Path::new(&full).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default()
+        String::from_utf16_lossy(&buf[..len as usize])
     }
+}
+
+/// Reads the games Windows has recognized: HKCU\System\GameConfigStore\Children\*\MatchedExeFullPath
+pub fn load_known_games() {
+    use windows_sys::Win32::System::Registry::*;
+    let mut games = HashSet::new();
+    unsafe {
+        let key: Vec<u16> = r"System\GameConfigStore\Children".encode_utf16().chain(Some(0)).collect();
+        let value: Vec<u16> = "MatchedExeFullPath".encode_utf16().chain(Some(0)).collect();
+        let mut hkey = null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, key.as_ptr(), 0, KEY_READ, &mut hkey) == ERROR_SUCCESS {
+            for i in 0.. {
+                let mut name = [0u16; 256];
+                let mut name_len = name.len() as u32;
+                if RegEnumKeyExW(hkey, i, name.as_mut_ptr(), &mut name_len, null(), null_mut(), null_mut(), null_mut()) != ERROR_SUCCESS {
+                    break;
+                }
+                let mut buf = [0u16; 1024];
+                let mut size = (buf.len() * 2) as u32;
+                if RegGetValueW(hkey, name.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, null_mut(), buf.as_mut_ptr().cast(), &mut size) == ERROR_SUCCESS {
+                    let n = (size as usize / 2).saturating_sub(1);
+                    games.insert(String::from_utf16_lossy(&buf[..n]).to_lowercase());
+                }
+            }
+            RegCloseKey(hkey);
+        }
+    }
+    *KNOWN_GAMES.lock().unwrap() = Some(games);
 }
 
 fn replay_middle_click() {

@@ -107,6 +107,7 @@ pub fn main() {
             })
         });
         add_tray();
+        hook::load_known_games();
         hook::start();
         sites::start();
         if first_run {
@@ -155,6 +156,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
         },
         WM_SETTINGCHANGE => apply_menu_theme(), // light/dark switch
         WM_RELOAD_SETTINGS => {
+            hook::load_known_games();
             let s = Settings::load();
             apply_settings(&s);
             with_app(|a| a.settings = s);
@@ -190,6 +192,8 @@ fn apply_menu_theme() {
 
 fn apply_settings(s: &Settings) {
     HOLD_MS.store(s.hold_ms, Ordering::Relaxed);
+    BLOCK_GAMES.store(s.block_games, Ordering::Relaxed);
+    *ALLOWED_GAMES.lock().unwrap() = s.allowed_games.clone();
     *sites::SITES.lock().unwrap() = s.sites.clone();
     *IGNORED.lock().unwrap() = s
         .ignored

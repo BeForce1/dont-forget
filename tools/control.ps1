@@ -49,7 +49,7 @@ $AfterModes = [ordered]@{ follow = 'Follow my mouse'; drop = 'Follow until I cli
 $HoldTimes = 150, 250, 400, 600
 
 function Read-Settings {
-    $s = [ordered]@{ after_capture = 'follow'; hold_ms = '250'; ignored_apps = 'SLDWORKS,blender,FreeCAD,acad'; ignored_sites = ''; shown_intro = '0' }
+    $s = [ordered]@{ after_capture = 'follow'; hold_ms = '250'; ignored_apps = 'SLDWORKS,blender,FreeCAD,acad'; ignored_sites = ''; block_games = '1'; allowed_games = ''; shown_intro = '0' }
     if (Test-Path $SettingsPath) {
         foreach ($line in Get-Content $SettingsPath) {
             if ($line -match '^\s*([a-z_]+)\s*=\s*([^;]*)') { $s[$Matches[1]] = $Matches[2].Trim() }
@@ -66,6 +66,8 @@ function Save-Settings($s) {
         "hold_ms=$($s.hold_ms)   ; how long to hold the wheel before snipping"
         "ignored_apps=$($s.ignored_apps)   ; process names where the wheel is left alone"
         "ignored_sites=$($s.ignored_sites)   ; websites where it is off, e.g. youtube.com"
+        "block_games=$($s.block_games)   ; 1 = off in games unless listed in allowed_games"
+        "allowed_games=$($s.allowed_games)   ; games where it still works"
         "shown_intro=$($s.shown_intro)"
     )
     [IO.File]::WriteAllText($SettingsPath, ($lines -join "`n") + "`n")   # LF, like the app writes
@@ -142,6 +144,10 @@ function Set-Setting($name, $value) {
     if (Get-AppProcess) { Say 'Saved. Restart the app to apply it.' $C.Amber } else { Say 'Saved.' }
 }
 
+function Switch-Games {
+    Set-Setting block_games $(if ((Read-Settings).block_games -ne '0') { '0' } else { '1' })
+}
+
 function Step-After($dir) {
     $keys = @($AfterModes.Keys)
     $i = [array]::IndexOf($keys, (Read-Settings).after_capture)
@@ -154,32 +160,58 @@ function Step-Hold($dir) {
     Set-Setting hold_ms $HoldTimes[[math]::Clamp($i + $dir, 0, $HoldTimes.Count - 1)]
 }
 
+# Same rules as the app (src/common/games.rs): game-store library folders + Windows' own game list.
+$GameFolders = '\steamapps\common\', '\epic games\', '\gog galaxy\games\', '\gog games\', '\xboxgames\', '\riot games\',
+    '\ubisoft game launcher\games\', '\ea games\', '\origin games\', '\rockstar games\', '\itch\apps\'
+$Launchers = '\epic games\launcher\', '\epic games\epiconlineservices\'
+
+function Test-GamePath($path) {
+    $p = "$path".ToLower()
+    foreach ($l in $Launchers) { if ($p.Contains($l)) { return $false } }
+    foreach ($f in $GameFolders) { if ($p.Contains($f)) { return $true } }
+    $false
+}
+
+function Get-KnownGames {
+    Get-ChildItem HKCU:\System\GameConfigStore\Children -ErrorAction SilentlyContinue |
+        ForEach-Object { (Get-ItemProperty $_.PSPath -Name MatchedExeFullPath -ErrorAction SilentlyContinue).MatchedExeFullPath } |
+        Where-Object { $_ } | Sort-Object -Unique
+}
+
 function Get-AppCatalog {
-    # Start menu shortcuts + registered App Paths + windows that are open right now.
+    # Start menu shortcuts + registered App Paths + windows open right now + games Windows knows.
     $found = @{}
+    $known = @(Get-KnownGames)
     $add = {
-        param($exe, $name)
+        param($exe, $name, $path)
         # some shortcuts point at a launcher (SOLIDWORKS: i386_SldWorks.exe starts SLDWORKS.exe)
         $stem = [IO.Path]::GetFileNameWithoutExtension("$exe") -replace '^i386_', ''
         if (-not $stem -or $stem -match '^(unins\d*|uninstall|setup|update|updater|crashpad_handler)$') { return }
-        if (-not $found.ContainsKey($stem.ToLower())) {
-            $found[$stem.ToLower()] = [pscustomobject]@{ Name = $(if ($name) { $name } else { $stem }); Exe = $stem }
-        }
+        $game = [bool]$path -and ((Test-GamePath $path) -or $known -contains $path)
+        $k = $stem.ToLower()
+        if (-not $found.ContainsKey($k)) {
+            $found[$k] = [pscustomobject]@{ Name = $(if ($name) { $name } else { $stem }); Exe = $stem; Game = $game }
+        } elseif ($game) { $found[$k].Game = $true }
+    }
+    foreach ($path in $known) {
+        # "...\steamapps\common\Portal 2\portal2.exe" -> "Portal 2"
+        $title = if ($path -match '(?i)\\common\\([^\\]+)\\') { $Matches[1] } else { [IO.Path]::GetFileNameWithoutExtension($path) }
+        & $add $path $title $path
     }
     $shell = New-Object -ComObject WScript.Shell
     $menus = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs", "$env:APPDATA\Microsoft\Windows\Start Menu\Programs"
     foreach ($lnk in Get-ChildItem $menus -Recurse -Filter *.lnk -ErrorAction SilentlyContinue) {
         if ($lnk.BaseName -match 'uninstall|readme|help|website|documentation|release notes') { continue }
         $target = try { $shell.CreateShortcut($lnk.FullName).TargetPath } catch { '' }
-        if ($target -like '*.exe') { & $add $target $lnk.BaseName }
+        if ($target -like '*.exe') { & $add $target $lnk.BaseName $target }
     }
     foreach ($hive in 'HKLM', 'HKCU') {
         Get-ChildItem "${hive}:\Software\Microsoft\Windows\CurrentVersion\App Paths" -ErrorAction SilentlyContinue |
-            ForEach-Object { & $add $_.PSChildName $null }
+            ForEach-Object { & $add $_.PSChildName $null $null }
     }
     foreach ($p in Get-Process | Where-Object MainWindowHandle -ne 0) {
         $desc = try { $p.MainModule.FileVersionInfo.FileDescription } catch { $null }
-        & $add $p.ProcessName $desc
+        & $add $p.ProcessName $desc $p.Path
     }
     @($found.Values)
 }
@@ -194,12 +226,17 @@ function Edit-Exceptions {
     Clear-Host
     Write-Host "`n  $($C.Dim)Looking for your apps…$($C.Reset)"
     $s = Read-Settings
-    $checked = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($x in $s.ignored_apps -split ',' | Where-Object { $_ }) { [void]$checked.Add($x) }
+    $newSet = { $h = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase); foreach ($x in "$($args[0])" -split ',' | Where-Object { $_ }) { [void]$h.Add($x) }; , $h }
+    $checked = & $newSet $s.ignored_apps      # apps where it's off
+    $allowed = & $newSet $s.allowed_games     # games where it's on anyway
+    $blockGames = $s.block_games -ne '0'
     $catalog = [System.Collections.Generic.List[object]]@(Get-AppCatalog)
-    foreach ($x in @($checked)) {
-        if (-not ($catalog | Where-Object Exe -eq $x)) { $catalog.Add([pscustomobject]@{ Name = $x; Exe = $x }) }
+    foreach ($x in @($checked) + @($allowed)) {
+        if (-not ($catalog | Where-Object Exe -eq $x)) { $catalog.Add([pscustomobject]@{ Name = $x; Exe = $x; Game = $allowed.Contains($x) }) }
     }
+    # games follow the allow list (off unless allowed); other apps follow the ignore list
+    $isGame = { param($app) $blockGames -and $app.Game }
+    $isOff = { param($app) if (& $isGame $app) { -not $allowed.Contains($app.Exe) } else { $checked.Contains($app.Exe) } }
     $catalog = @($catalog | Sort-Object Name)
     $sites = [System.Collections.Generic.List[string]]@($s.ignored_sites -split ',' | Where-Object { $_ })
 
@@ -225,10 +262,11 @@ function Edit-Exceptions {
             if ($i -eq $tab) { "$($C.Sel)$($C.Amber)$($C.Bold) $($tabNames[$i]) $($C.Reset)" } else { "$($C.Dim) $($tabNames[$i]) $($C.Reset)" }
         }
         & $line ''
-        & $line "  $($C.Bold)Where Don't Forget stays off$($C.Reset)   $($tabs -join ' ')   $($C.Dim)Tab switches$($C.Reset)"
+        & $line "  $($C.Bold)Where Don't Forget works$($C.Reset)   $($tabs -join ' ')   $($C.Dim)Tab switches$($C.Reset)"
         & $line "  $($C.Dim)$('─' * 70)$($C.Reset)"
         if ($tab -eq 0) {
-            & $line "  Search: $($C.White)$query$($C.Amber)▏$($C.Reset)   $($C.Dim)$($list.Count) of $($catalog.Count) apps · $($checked.Count) off$($C.Reset)"
+            $offCount = @($catalog | Where-Object { & $isOff $_ }).Count
+            & $line "  Search: $($C.White)$query$($C.Amber)▏$($C.Reset)   $($C.Dim)$($list.Count) of $($catalog.Count) apps · $offCount off$(if ($blockGames) { ' · games are off unless switched on' })$($C.Reset)"
         } else {
             & $line "  Add a site: $($C.White)$siteText$($C.Amber)▏$($C.Reset)   $($C.Dim)e.g. youtube.com or github.com/settings$($C.Reset)"
         }
@@ -241,9 +279,10 @@ function Edit-Exceptions {
                 $text = "$($C.Blue)◆$($C.Reset)$bg $($C.White)$($sites[$r])"
             } elseif ($r -lt $list.Count) {
                 $app = $list[$r]
-                $mark = if ($checked.Contains($app.Exe)) { "$($C.Green)✔" } else { "$($C.Dim)○" }
+                $mark = if (& $isOff $app) { "$($C.Dim)○ off" } else { "$($C.Green)● on " }
                 $name = if ($app.Name.Length -gt 40) { $app.Name.Substring(0, 39) + '…' } else { $app.Name.PadRight(40) }
-                $text = "$mark$($C.Reset)$bg $($C.White)$name $($C.Dim)$($app.Exe)"
+                $tag = if ($app.Game) { "$($C.Amber)game  " } else { '      ' }
+                $text = "$mark$($C.Reset)$bg $($C.White)$name $tag$($C.Dim)$($app.Exe)"
             } else {
                 $text = "$($C.Amber)+$($C.Reset)$bg $($C.White)Add `"$query`" as a process name"
             }
@@ -254,7 +293,7 @@ function Edit-Exceptions {
             & $line "     $($C.Dim)$empty$($C.Reset)"
         }
         & $line ''
-        $help = if ($tab -eq 0) { 'type to search · ↑↓ move · Space/Enter switch off/on · Tab websites · Esc save' }
+        $help = if ($tab -eq 0) { 'type to search · ↑↓ move · Space/Enter switch on/off · Tab websites · Esc save' }
                 else { 'type a site, Enter adds · ↑↓ move · Delete removes · Tab apps · Esc save' }
         & $line "  $($C.Dim)$help$($C.Reset)"
         [void]$out.Append("$E[J")
@@ -278,10 +317,11 @@ function Edit-Exceptions {
         elseif ($key -eq 'Delete') { if ($tab -eq 1 -and $count -gt 0) { $sites.RemoveAt($sel) } }
         elseif ($tab -eq 0 -and $key -in 'Enter', 'Spacebar') {
             if ($sel -lt $list.Count) {
-                $exe = $list[$sel].Exe
-                if (-not $checked.Remove($exe)) { [void]$checked.Add($exe) }
+                $app = $list[$sel]
+                $set = if (& $isGame $app) { $allowed } else { $checked }
+                if (-not $set.Remove($app.Exe)) { [void]$set.Add($app.Exe) }
             } elseif ($canAdd) {
-                $catalog = @(@($catalog) + [pscustomobject]@{ Name = $query; Exe = $query } | Sort-Object Name)
+                $catalog = @(@($catalog) + [pscustomobject]@{ Name = $query; Exe = $query; Game = $false } | Sort-Object Name)
                 [void]$checked.Add($query)
             }
         }
@@ -299,9 +339,10 @@ function Edit-Exceptions {
     }
     $s = Read-Settings
     $s.ignored_apps = (@($checked) | Sort-Object) -join ','
+    $s.allowed_games = (@($allowed) | Sort-Object) -join ','
     $s.ignored_sites = $sites -join ','
     Save-Settings $s
-    $msg = "Saved: $($checked.Count) app$(if ($checked.Count -ne 1) { 's' }), $($sites.Count) website$(if ($sites.Count -ne 1) { 's' })."
+    $msg = "Saved: $($checked.Count) app$(if ($checked.Count -ne 1) { 's' }) off, $($allowed.Count) game$(if ($allowed.Count -ne 1) { 's' }) on, $($sites.Count) website$(if ($sites.Count -ne 1) { 's' }) off."
     if (Get-AppProcess) { Say "$msg Restart the app to apply." $C.Amber } else { Say $msg }
     Clear-Host
 }
@@ -333,13 +374,17 @@ $Items = @(
     @{ Key = 'W'; Label = { param($s) "Start with Windows   $(if ($s.Startup) { "$($C.Green)on" } else { "$($C.Dim)off" })$($C.Reset)" }; Run = { Switch-Startup }; Step = { Switch-Startup } }
     @{ Key = 'A'; Label = { param($s) "After a snip         $($C.Blue)‹ $($AfterModes[$s.Settings.after_capture]) ›$($C.Reset)" }; Run = { Step-After 1 }; Step = { param($d) Step-After $d } }
     @{ Key = 'H'; Label = { param($s) "Hold time            $($C.Blue)‹ $($s.Settings.hold_ms) ms ›$($C.Reset)" }; Run = { Step-Hold 1 }; Step = { param($d) Step-Hold $d } }
+    @{ Key = 'G'; Label = { param($s)
+            $text = if ($s.Settings.block_games -ne '0') { 'off unless switched on per game' } else { 'on in games too' }
+            "Games                $($C.Blue)‹ $text ›$($C.Reset)" }
+        Run = { Switch-Games }; Step = { Switch-Games } }
     @{ Key = 'I'; Label = { param($s)
             $a = @($s.Settings.ignored_apps -split ',' | Where-Object { $_ }).Count
             $w = @($s.Settings.ignored_sites -split ',' | Where-Object { $_ }).Count
             "Apps & sites to skip $($C.Dim)$a app$(if ($a -ne 1) { 's' }) · $w site$(if ($w -ne 1) { 's' })$($C.Reset)" }; Run = { Edit-Exceptions } }
     @{ Key = 'E'; Label = { 'Open settings file' }; Run = { Start-Process notepad.exe $SettingsPath; Say 'Opened in Notepad.' } }
     @{ Key = 'B'; Label = { 'Rebuild from source' }; Run = { Build-App } }
-    @{ Key = 'G'; Label = { 'Open GitHub page' }; Run = { Start-Process $Repo; Say 'Opened in your browser.' } }
+    @{ Key = 'O'; Label = { 'Open GitHub page' }; Run = { Start-Process $Repo; Say 'Opened in your browser.' } }
     @{ Key = 'Q'; Label = { 'Quit' }; Run = { $script:Quit = $true } }
 )
 
@@ -378,6 +423,7 @@ if ($Status) {
     Show-Status $s
     "  start with Windows: $(if ($s.Startup) { 'on' } else { 'off' }) · after a snip: $($AfterModes[$s.Settings.after_capture]) · hold: $($s.Settings.hold_ms) ms"
     "  skipped apps: $($s.Settings.ignored_apps) · skipped sites: $(if ($s.Settings.ignored_sites) { $s.Settings.ignored_sites } else { 'none' })"
+    "  games: $(if ($s.Settings.block_games -ne '0') { 'off unless allowed' } else { 'on' }) · allowed games: $(if ($s.Settings.allowed_games) { $s.Settings.allowed_games } else { 'none' })"
     return
 }
 

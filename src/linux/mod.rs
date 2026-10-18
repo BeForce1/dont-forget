@@ -10,6 +10,7 @@ mod overlay;
 
 use crate::common::{
     anim,
+    games::{is_game_path, same_app},
     settings::{After, Settings},
 };
 use overlay::Overlay;
@@ -76,6 +77,12 @@ struct Note {
     dragged: bool,
 }
 
+/// What we know about the process behind a window, cached per process id.
+struct Proc {
+    name: String,
+    game: bool,
+}
+
 pub struct App {
     conn: Conn,
     root: Window,
@@ -91,7 +98,7 @@ pub struct App {
     followers: Vec<Window>, // newest first
     press: Press,
     overlay: Option<Overlay>,
-    pid_names: HashMap<u32, String>,
+    procs: HashMap<u32, Proc>,
     drop_grabbed: bool,
     last_follow: Instant,
     quit: bool,
@@ -222,7 +229,7 @@ impl App {
             followers: Vec::new(),
             press: Press::Idle,
             overlay: None,
-            pid_names: HashMap::new(),
+            procs: HashMap::new(),
             drop_grabbed: false,
             last_follow: Instant::now(),
             quit: false,
@@ -317,7 +324,12 @@ impl App {
                 }
             }
             1 if self.drop_grabbed => {
-                // "follow until I click": this click places the notes
+                // "follow until I click": this click places the notes, except in games and ignored apps
+                if self.is_ignored(e.child) {
+                    conn.allow_events(Allow::REPLAY_POINTER, e.time)?;
+                    return Ok(());
+                }
+                conn.allow_events(Allow::ASYNC_POINTER, e.time)?;
                 for w in self.followers.clone() {
                     if self.notes.iter().any(|n| n.win == w && n.mode == Mode::Drop) {
                         self.set_mode(w, Mode::Pinned)?;
@@ -396,17 +408,27 @@ impl App {
     // ---------- ignored apps ----------
 
     /// Is the top-level window under the pointer owned by an ignored process?
+    /// Should this press go straight to the app? Ignored apps, and games unless allowed.
     fn is_ignored(&mut self, top: Window) -> bool {
-        if top == NONE || self.settings.ignored.is_empty() {
+        if top == NONE {
             return false;
         }
         let Some(pid) = self.window_pid(top) else { return false };
-        let name = self
-            .pid_names
-            .entry(pid)
-            .or_insert_with(|| std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default().trim().to_lowercase())
-            .clone();
-        self.settings.ignored.iter().any(|a| a.to_lowercase().trim_end_matches(".exe") == name)
+        let p = self.procs.entry(pid).or_insert_with(|| {
+            let read = |f: &str| std::fs::read(format!("/proc/{pid}/{f}")).unwrap_or_default();
+            let exe = std::fs::read_link(format!("/proc/{pid}/exe")).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            // Proton/Wine games run as wine processes; the game's path is in the command line
+            let cmdline = String::from_utf8_lossy(&read("cmdline")).replace('\0', " ");
+            Proc {
+                name: String::from_utf8_lossy(&read("comm")).trim().to_lowercase(),
+                game: is_game_path(&exe) || is_game_path(&cmdline),
+            }
+        });
+        let s = &self.settings;
+        if s.ignored.iter().any(|a| same_app(a, &p.name)) {
+            return true;
+        }
+        s.block_games && p.game && !s.allowed_games.iter().any(|a| same_app(a, &p.name))
     }
 
     /// Process id of the app behind a top-level window. Under a window manager that window is
@@ -556,7 +578,7 @@ impl App {
         let want = self.notes.iter().any(|n| n.mode == Mode::Drop);
         if want && !self.drop_grabbed {
             let mask = EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE;
-            self.conn.grab_button(false, self.root, mask, GrabMode::ASYNC, GrabMode::ASYNC, NONE, NONE, ButtonIndex::M1, ModMask::ANY)?;
+            self.conn.grab_button(false, self.root, mask, GrabMode::SYNC, GrabMode::ASYNC, NONE, NONE, ButtonIndex::M1, ModMask::ANY)?;
         } else if !want && self.drop_grabbed {
             self.conn.ungrab_button(ButtonIndex::M1, self.root, ModMask::ANY)?;
         }

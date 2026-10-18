@@ -8,7 +8,7 @@ mkdir -p "$out"
 export DISPLAY=:99
 cfg=/root/.config/dont-forget
 mkdir -p "$cfg"
-printf 'after_capture=follow\nhold_ms=250\nignored_apps=xeyes\nignored_sites=\nshown_intro=1\n' > "$cfg/settings.ini"
+printf 'after_capture=follow\nhold_ms=250\nignored_apps=xeyes\nignored_sites=\nblock_games=1\nallowed_games=\nshown_intro=1\n' > "$cfg/settings.ini"
 
 pkill -f "Xvfb :99" 2>/dev/null; sleep 0.3
 Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >/dev/null 2>&1 &
@@ -28,6 +28,9 @@ display -geometry +60+60 -title problem /tmp/problem.png &
 xev -geometry 360x220+760+80 -name xev-target -event button > /tmp/xev.log 2>&1 &
 # an "ignored app" (process name xeyes) where wheel-drags must pass straight through
 xeyes -geometry 300x200+760+420 &
+# a "game": any program running from a Steam library folder
+mkdir -p /tmp/steamapps/common/FakeGame && cp "$(command -v xeyes)" /tmp/steamapps/common/FakeGame/fakegame
+/tmp/steamapps/common/FakeGame/fakegame -geometry 200x120+1040+660 &
 sleep 1.5
 
 "$bin" > /tmp/df.log 2>&1 &
@@ -86,6 +89,17 @@ check "wheel click on a note deletes it" "[ \$(notes) -eq 1 ]"
 # 7. commands
 "$bin" --clear >/dev/null; sleep 0.3
 check "--clear removes all notes" "[ \$(notes) -eq 0 ]"
+
+# 8. games: a wheel-drag in a game goes to the game, unless that game is allowed
+drag_game() { xdotool mousemove 1080 690 mousedown 2; for i in $(seq 1 10); do xdotool mousemove $((1080 + i*8)) $((690 + i*4)); sleep 0.02; done; sleep 0.4; xdotool mouseup 2; sleep 0.4; }
+drag_game
+check "game gets the drag, no note" "[ \$(notes) -eq 0 ]"
+sed -i 's/^allowed_games=.*/allowed_games=fakegame/' "$cfg/settings.ini"
+"$bin" --reload >/dev/null
+drag_game
+check "allowed game: the drag snips" "[ \$(notes) -eq 1 ]"
+shot 6-allowed-game
+"$bin" --clear >/dev/null; sleep 0.3
 "$bin" --quit >/dev/null; sleep 0.5
 check "--quit stops it" "! pgrep -x DontForget >/dev/null"
 
