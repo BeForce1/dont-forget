@@ -28,6 +28,7 @@ use x11rb::{
     connection::{Connection, RequestConnection},
     wrapper::ConnectionExt as _,
     protocol::{
+        res::{self, ConnectionExt as _},
         shape::{self, ConnectionExt as _},
         xproto::*,
         xtest::ConnectionExt as _,
@@ -84,6 +85,7 @@ pub struct App {
     gc: Gcontext,
     crosshair: Cursor,
     net_wm_pid: Atom,
+    wm_state: Atom,
     settings: Settings,
     notes: Vec<Note>,
     followers: Vec<Window>, // newest first
@@ -201,6 +203,10 @@ impl App {
         conn.create_glyph_cursor(crosshair, font, font, 34, 35, 0, 0, 0, 0xffff, 0xffff, 0xffff)?;
         conn.close_font(font)?;
         let net_wm_pid = conn.intern_atom(false, b"_NET_WM_PID")?.reply()?.atom;
+        let wm_state = conn.intern_atom(false, b"WM_STATE")?.reply()?.atom;
+        if conn.extension_information(res::X11_EXTENSION_NAME)?.is_some() {
+            conn.res_query_version(1, 2)?.reply()?;
+        }
         Ok(App {
             conn,
             root,
@@ -210,6 +216,7 @@ impl App {
             gc,
             crosshair,
             net_wm_pid,
+            wm_state,
             settings: Settings::load(),
             notes: Vec::new(),
             followers: Vec::new(),
@@ -393,7 +400,7 @@ impl App {
         if top == NONE || self.settings.ignored.is_empty() {
             return false;
         }
-        let Some(pid) = self.window_pid(top, 3) else { return false };
+        let Some(pid) = self.window_pid(top) else { return false };
         let name = self
             .pid_names
             .entry(pid)
@@ -402,17 +409,30 @@ impl App {
         self.settings.ignored.iter().any(|a| a.to_lowercase().trim_end_matches(".exe") == name)
     }
 
-    /// _NET_WM_PID of the window or of the client window inside a window-manager frame.
-    fn window_pid(&self, win: Window, depth: u8) -> Option<u32> {
-        let prop = self.conn.get_property(false, win, self.net_wm_pid, AtomEnum::CARDINAL, 0, 1).ok()?.reply().ok()?;
+    /// Process id of the app behind a top-level window. Under a window manager that window is
+    /// the manager's frame, so first find the app's own window (the one with WM_STATE), then use
+    /// its _NET_WM_PID or, for apps that don't set it, ask the server who owns it (X-Resource).
+    fn window_pid(&self, top: Window) -> Option<u32> {
+        let client = self.find_client(top, 3).unwrap_or(top);
+        let prop = self.conn.get_property(false, client, self.net_wm_pid, AtomEnum::CARDINAL, 0, 1).ok()?.reply().ok()?;
         if let Some(pid) = prop.value32().and_then(|mut v| v.next()) {
             return Some(pid);
+        }
+        let spec = res::ClientIdSpec { client, mask: res::ClientIdMask::LOCAL_CLIENT_PID };
+        let reply = self.conn.res_query_client_ids(&[spec]).ok()?.reply().ok()?;
+        reply.ids.iter().find_map(|id| id.value.first().copied())
+    }
+
+    fn find_client(&self, win: Window, depth: u8) -> Option<Window> {
+        let state = self.conn.get_property(false, win, self.wm_state, AtomEnum::ANY, 0, 0).ok()?.reply().ok()?;
+        if state.type_ != NONE {
+            return Some(win);
         }
         if depth == 0 {
             return None;
         }
         let tree = self.conn.query_tree(win).ok()?.reply().ok()?;
-        tree.children.iter().rev().find_map(|&c| self.window_pid(c, depth - 1))
+        tree.children.iter().rev().find_map(|&c| self.find_client(c, depth - 1))
     }
 
     // ---------- selection ----------
