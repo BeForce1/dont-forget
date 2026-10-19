@@ -34,5 +34,5 @@ Run `cargo build --release` with Rust. The `x86_64-pc-windows-gnu` toolchain wor
 - **System:** Windows 10 or 11, 64-bit. On Windows 10, notes have square corners instead of rounded ones.
 - **Mouse:** any mouse with a clickable scroll wheel (middle button).
 - **CPU:** any 64-bit processor. It uses no CPU while idle.
-- **Memory:** about 2.5 MB of RAM.
-- **Disk:** a single ~400 KB `.exe`, with nothing else to install.
+- **Memory:** under 2 MB of RAM, and about 0.2 MB in Task Manager while idle.
+- **Disk:** a single ~450 KB `.exe`, with nothing else to install.

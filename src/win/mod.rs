@@ -16,7 +16,7 @@ use std::{
 use windows_sys::Win32::{
     Foundation::*,
     Graphics::Gdi::*,
-    System::{LibraryLoader::*, Registry::*, Threading::CreateMutexW},
+    System::{LibraryLoader::*, Registry::*, Threading::{CreateMutexW, GetCurrentProcess, SetProcessWorkingSetSize}},
     UI::{HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
 };
 
@@ -110,6 +110,7 @@ pub fn main() {
         hook::load_known_games();
         hook::start();
         sites::start();
+        trim_memory();
         if first_run {
             show_help();
             with_app(|a| {
@@ -195,6 +196,7 @@ fn apply_settings(s: &Settings) {
     BLOCK_GAMES.store(s.block_games, Ordering::Relaxed);
     *ALLOWED_GAMES.lock().unwrap() = s.allowed_games.clone();
     *sites::SITES.lock().unwrap() = s.sites.clone();
+    sites::wake();
     *IGNORED.lock().unwrap() = s
         .ignored
         .iter()
@@ -230,6 +232,14 @@ pub fn note_destroyed(hwnd: HWND) {
         a.followers.retain(|&h| h != hwnd);
     });
     update_armed();
+    if NOTES.lock().unwrap().is_empty() {
+        trim_memory();
+    }
+}
+
+/// Hands pages back to Windows while idle; touched again, they come back from RAM in microseconds.
+pub fn trim_memory() {
+    unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX) };
 }
 
 pub fn on_mode_changed(hwnd: HWND, mode: Mode) {

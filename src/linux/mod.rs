@@ -24,7 +24,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tiny_skia::Pixmap;
+use draw::Image;
 use x11rb::{
     connection::{Connection, RequestConnection},
     wrapper::ConnectionExt as _,
@@ -64,7 +64,7 @@ enum Press {
 
 struct Note {
     win: Window,
-    image: Pixmap,
+    image: Image,
     edge: (u8, u8, u8),
     scale: f32,
     mode: Mode,
@@ -491,7 +491,7 @@ impl App {
 
     // ---------- notes ----------
 
-    fn add_note(&mut self, image: Pixmap, at: (i32, i32), additive: bool) -> Res<()> {
+    fn add_note(&mut self, image: Image, at: (i32, i32), additive: bool) -> Res<()> {
         if !additive {
             self.pin_followers()?;
         }

@@ -1,7 +1,7 @@
 // Full-screen selection overlay: a frozen screenshot, dimmed, with the selected area bright.
 // Both versions live as server-side pixmaps, so dragging only copies the changed region.
 use super::{draw, put_image, Conn, Res};
-use tiny_skia::{IntRect, Pixmap};
+use super::draw::Image;
 use x11rb::{connection::Connection, protocol::xproto::*};
 
 pub struct Overlay {
@@ -9,7 +9,7 @@ pub struct Overlay {
     pub start: (i32, i32),
     pub cur: (i32, i32),
     screen: (i32, i32),
-    shot: Pixmap, // client copy, for cropping
+    shot: Image, // client copy, for cropping
     bright: x11rb::protocol::xproto::Pixmap,
     dim: x11rb::protocol::xproto::Pixmap,
     gc: Gcontext,
@@ -78,12 +78,12 @@ impl Overlay {
         (l, t, r - l, b - t)
     }
 
-    pub fn crop(&self) -> Option<Pixmap> {
+    pub fn crop(&self) -> Option<Image> {
         let (x, y, w, h) = self.selection();
         if w < 4 || h < 4 {
             return None;
         }
-        self.shot.clone_rect(IntRect::from_xywh(x, y, w as u32, h as u32)?)
+        self.shot.crop(x, y, w as u32, h as u32)
     }
 
     pub fn track(&mut self, conn: &Conn, p: (i32, i32)) -> Res<()> {

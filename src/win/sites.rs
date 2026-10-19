@@ -4,8 +4,8 @@
 use super::hook::process_name;
 use crate::common::sites::{matches, BROWSERS};
 use std::{
-    sync::{atomic::*, Mutex},
-    thread,
+    sync::{atomic::*, Mutex, OnceLock},
+    thread::{self, Thread},
     time::{Duration, Instant},
 };
 use windows::{
@@ -21,6 +21,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 pub static SITES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// The browser window currently showing an ignored site (0 if none).
 pub static BLOCKED_WINDOW: AtomicIsize = AtomicIsize::new(0);
+static WATCHER: OnceLock<Thread> = OnceLock::new();
 
 
 
@@ -58,18 +59,26 @@ fn automation() -> Option<IUIAutomation> {
     }
 }
 
+/// Call after changing SITES: the watcher sleeps for good while the list is empty.
+pub fn wake() {
+    if let Some(t) = WATCHER.get() {
+        t.unpark();
+    }
+}
+
 pub fn start() {
-    thread::spawn(|| {
+    let handle = thread::spawn(|| {
         let mut uia: Option<IUIAutomation> = None;
         let mut last = (0isize, String::new());
         let mut checked = Instant::now();
         loop {
-            thread::sleep(Duration::from_millis(300));
             let sites = SITES.lock().unwrap().clone();
             if sites.is_empty() {
                 BLOCKED_WINDOW.store(0, Ordering::Relaxed);
+                thread::park();
                 continue;
             }
+            thread::sleep(Duration::from_millis(300));
             let fg = unsafe { GetForegroundWindow() } as isize;
             let key = (fg, title(fg));
             // re-read on window/title change, and every few seconds for pages that keep their title
@@ -88,6 +97,7 @@ pub fn start() {
             BLOCKED_WINDOW.store(if blocked { fg } else { 0 }, Ordering::Relaxed);
         }
     });
+    let _ = WATCHER.set(handle.thread().clone());
 }
 
 /// `DontForget.exe --probe-url`: prints the address of every open browser window and exits.
