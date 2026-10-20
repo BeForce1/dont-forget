@@ -155,7 +155,9 @@ function Step-After($dir) {
 }
 
 function Step-Hold($dir) {
-    $i = [array]::IndexOf($HoldTimes, [int](Read-Settings).hold_ms)
+    $ms = 0
+    [void][int]::TryParse((Read-Settings).hold_ms, [ref]$ms)   # a hand-edited typo must not crash the panel
+    $i = [array]::IndexOf($HoldTimes, $ms)
     if ($i -lt 0) { $i = 1 }
     Set-Setting hold_ms $HoldTimes[[math]::Clamp($i + $dir, 0, $HoldTimes.Count - 1)]
 }

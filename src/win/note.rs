@@ -383,6 +383,10 @@ fn copy_image(img: &Dib) {
             return;
         }
         let p = GlobalLock(mem) as *mut u8;
+        if p.is_null() {
+            GlobalFree(mem);
+            return;
+        }
         let bi = p as *mut BITMAPINFOHEADER;
         *bi = zeroed();
         (*bi).biSize = header as u32;
@@ -399,10 +403,15 @@ fn copy_image(img: &Dib) {
             dst[row * w..(row + 1) * w].copy_from_slice(&src[from..from + w]);
         }
         GlobalUnlock(mem);
+        // the clipboard owns the memory only once SetClipboardData succeeds; otherwise it's ours to free
+        let mut owned = false;
         if OpenClipboard(super::hidden()) != 0 {
             EmptyClipboard();
-            SetClipboardData(8 /* CF_DIB */, mem);
+            owned = !SetClipboardData(8 /* CF_DIB */, mem).is_null();
             CloseClipboard();
+        }
+        if !owned {
+            GlobalFree(mem);
         }
     }
 }

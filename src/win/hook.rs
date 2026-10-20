@@ -52,10 +52,11 @@ struct Hook {
     eat_middle_up: bool,
     eat_left_up: bool,
     timer: usize,
-    procs: HashMap<u32, Proc>,
+    procs: HashMap<(u32, u64), Proc>,
 }
 
-/// What we know about the process behind a window, cached per process id.
+/// What we know about the process behind a window, cached per process id and start time
+/// (Windows reuses ids, so the id alone could hand a new process an old one's verdict).
 struct Proc {
     name: String,
     game: bool,
@@ -204,7 +205,11 @@ fn root_at(p: POINT) -> HWND {
 fn is_ignored(h: &mut Hook, hwnd: HWND) -> bool {
     let mut pid = 0;
     unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-    let p = h.procs.entry(pid).or_insert_with(|| {
+    let started = process_start(pid);
+    if h.procs.len() > 512 {
+        h.procs.clear(); // exited processes would otherwise pile up forever
+    }
+    let p = h.procs.entry((pid, started)).or_insert_with(|| {
         let path = process_path(pid);
         let known = KNOWN_GAMES.lock().unwrap().as_ref().is_some_and(|k| k.contains(&path.to_lowercase()));
         Proc { name: stem(&path), game: known || is_game_path(&path) }
@@ -234,6 +239,23 @@ fn stem(path: &str) -> String {
 
 pub fn process_name(pid: u32) -> String {
     stem(&process_path(pid))
+}
+
+/// Process creation time (FILETIME ticks), 0 if the process can't be opened.
+fn process_start(pid: u32) -> u64 {
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return 0;
+        }
+        let (mut created, mut exited, mut kernel, mut user): (FILETIME, FILETIME, FILETIME, FILETIME) = zeroed();
+        let ok = GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user);
+        CloseHandle(process);
+        if ok == 0 {
+            return 0;
+        }
+        (created.dwHighDateTime as u64) << 32 | created.dwLowDateTime as u64
+    }
 }
 
 fn process_path(pid: u32) -> String {

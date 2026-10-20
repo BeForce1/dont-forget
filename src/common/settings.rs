@@ -104,6 +104,10 @@ impl Settings {
         if let Some(dir) = p.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        let _ = fs::write(p, text);
+        // write a temp file and rename it over the old one, so a crash mid-write can't wipe the settings
+        let tmp = p.with_extension("ini.tmp");
+        if fs::write(&tmp, text).is_ok() {
+            let _ = fs::rename(&tmp, &p);
+        }
     }
 }
