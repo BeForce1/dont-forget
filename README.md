@@ -69,3 +69,7 @@ Each note holds its snip as an uncompressed image, so it adds roughly width × h
 
 Release build v0.2.0 on a 20-thread Intel laptop running Windows 11. Startup takes about 12 ms until the message loop is ready (84 ms on a cold first launch). The app was then sampled idle for 30 s with no notes open: 0 ms of CPU time without a websites list, and 15.6 ms (0.003%) with one. Linux was measured under Xvfb in WSL2 (Ubuntu): 3.1 MB resident (192 KB anonymous), 0 CPU ticks in 30 s, and roughly 0.2 s from launch until the control socket answers.
 </details>
+
+## License
+
+MIT. See [LICENSE](LICENSE).

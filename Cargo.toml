@@ -2,6 +2,7 @@
 name = "dont-forget"
 version = "0.2.0"
 edition = "2021"
+license = "MIT"
 description = "Snip part of the screen with a mouse-wheel drag and keep it floating next to your cursor"
 
 [[bin]]
