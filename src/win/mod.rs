@@ -208,6 +208,9 @@ pub fn add_note(image: gfx::Dib, area: RECT, additive: bool) {
     if !additive {
         pin_followers();
     }
+    if with_app(|a| a.settings.copy_snips) {
+        note::copy_image(&image);
+    }
     let edge = if additive { overlay::BLUE } else { overlay::GREEN };
     let hwnd = note::create(image, area.left - note::BORDER, area.top - note::BORDER, edge);
     NOTES.lock().unwrap().push(hwnd as isize);

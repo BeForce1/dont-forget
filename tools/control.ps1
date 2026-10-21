@@ -49,7 +49,7 @@ $AfterModes = [ordered]@{ follow = 'Follow my mouse'; drop = 'Follow until I cli
 $HoldTimes = 150, 250, 400, 600
 
 function Read-Settings {
-    $s = [ordered]@{ after_capture = 'follow'; hold_ms = '250'; ignored_apps = 'SLDWORKS,blender,FreeCAD,acad'; ignored_sites = ''; block_games = '1'; allowed_games = ''; shown_intro = '0' }
+    $s = [ordered]@{ after_capture = 'follow'; hold_ms = '250'; ignored_apps = 'SLDWORKS,blender,FreeCAD,acad'; ignored_sites = ''; block_games = '1'; allowed_games = ''; copy_snips = '1'; shown_intro = '0' }
     if (Test-Path $SettingsPath) {
         foreach ($line in Get-Content $SettingsPath) {
             if ($line -match '^\s*([a-z_]+)\s*=\s*([^;]*)') { $s[$Matches[1]] = $Matches[2].Trim() }
@@ -68,6 +68,7 @@ function Save-Settings($s) {
         "ignored_sites=$($s.ignored_sites)   ; websites where it is off, e.g. youtube.com"
         "block_games=$($s.block_games)   ; 1 = off in games unless listed in allowed_games"
         "allowed_games=$($s.allowed_games)   ; games where it still works"
+        "copy_snips=$($s.copy_snips)   ; 1 = every new snip is also copied to the clipboard"
         "shown_intro=$($s.shown_intro)"
     )
     [IO.File]::WriteAllText($SettingsPath, ($lines -join "`n") + "`n")   # LF, like the app writes
@@ -146,6 +147,10 @@ function Set-Setting($name, $value) {
 
 function Switch-Games {
     Set-Setting block_games $(if ((Read-Settings).block_games -ne '0') { '0' } else { '1' })
+}
+
+function Switch-Copy {
+    Set-Setting copy_snips $(if ((Read-Settings).copy_snips -ne '0') { '0' } else { '1' })
 }
 
 function Step-After($dir) {
@@ -380,6 +385,7 @@ $Items = @(
             $text = if ($s.Settings.block_games -ne '0') { 'off unless switched on per game' } else { 'on in games too' }
             "Games                $($C.Blue)‹ $text ›$($C.Reset)" }
         Run = { Switch-Games }; Step = { Switch-Games } }
+    @{ Key = 'C'; Label = { param($s) "Copy snips           $(if ($s.Settings.copy_snips -ne '0') { "$($C.Green)on" } else { "$($C.Dim)off" })$($C.Reset)" }; Run = { Switch-Copy }; Step = { Switch-Copy } }
     @{ Key = 'I'; Label = { param($s)
             $a = @($s.Settings.ignored_apps -split ',' | Where-Object { $_ }).Count
             $w = @($s.Settings.ignored_sites -split ',' | Where-Object { $_ }).Count
@@ -423,7 +429,7 @@ function Render($s, $sel) {
 if ($Status) {
     $s = Get-State
     Show-Status $s
-    "  start with Windows: $(if ($s.Startup) { 'on' } else { 'off' }) · after a snip: $($AfterModes[$s.Settings.after_capture]) · hold: $($s.Settings.hold_ms) ms"
+    "  start with Windows: $(if ($s.Startup) { 'on' } else { 'off' }) · after a snip: $($AfterModes[$s.Settings.after_capture]) · hold: $($s.Settings.hold_ms) ms · copy snips: $(if ($s.Settings.copy_snips -ne '0') { 'on' } else { 'off' })"
     "  skipped apps: $($s.Settings.ignored_apps) · skipped sites: $(if ($s.Settings.ignored_sites) { $s.Settings.ignored_sites } else { 'none' })"
     "  games: $(if ($s.Settings.block_games -ne '0') { 'off unless allowed' } else { 'on' }) · allowed games: $(if ($s.Settings.allowed_games) { $s.Settings.allowed_games } else { 'none' })"
     return

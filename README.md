@@ -15,6 +15,7 @@
 | Quick wheel click anywhere | Drop the following notes where they are. |
 | Wheel click on a note | Delete it. |
 | Hold **Shift** | Freeze the following notes so you can reach them. |
+| **Ctrl+V** anywhere | Every new snip is also copied to the clipboard, ready to paste (turn off with Copy snips in the control panel). |
 | Click a note | Options: follow or pin, opacity, size, copy, delete. You can also drag it to move it and scroll on it to resize it. |
 
 **Games are left alone.** In games (anything Windows recognizes as a game, anything installed in a Steam, Epic, GOG, Xbox, Riot, Ubisoft, EA or Rockstar library, or a full-screen DirectX game) your mouse wheel works exactly as the game expects. You can switch Don't Forget back on for a specific game in the control panel.

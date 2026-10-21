@@ -374,7 +374,7 @@ fn menu(hwnd: HWND) {
 }
 
 /// Puts the image on the clipboard as a bottom-up CF_DIB.
-fn copy_image(img: &Dib) {
+pub fn copy_image(img: &Dib) {
     unsafe {
         let header = size_of::<BITMAPINFOHEADER>();
         let bytes = header + (img.w * img.h * 4) as usize;

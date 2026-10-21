@@ -17,6 +17,8 @@ pub struct Settings {
     /// Stay out of games (detected automatically) unless they are listed in `allowed_games`.
     pub block_games: bool,
     pub allowed_games: Vec<String>,
+    /// Put every new snip on the clipboard, ready to paste.
+    pub copy_snips: bool,
     pub shown_intro: bool,
 }
 
@@ -29,6 +31,7 @@ impl Default for Settings {
             sites: Vec::new(),
             block_games: true,
             allowed_games: Vec::new(),
+            copy_snips: true,
             shown_intro: false,
         }
     }
@@ -71,6 +74,7 @@ impl Settings {
                 "allowed_games" => {
                     s.allowed_games = value.split(',').map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect()
                 }
+                "copy_snips" => s.copy_snips = value != "0",
                 "shown_intro" => s.shown_intro = value == "1",
                 _ => {}
             }
@@ -92,12 +96,14 @@ impl Settings {
              ignored_sites={}   ; websites where it is off, e.g. youtube.com\n\
              block_games={}   ; 1 = off in games unless listed in allowed_games\n\
              allowed_games={}   ; games where it still works\n\
+             copy_snips={}   ; 1 = every new snip is also copied to the clipboard\n\
              shown_intro={}\n",
             self.hold_ms,
             self.ignored.join(","),
             self.sites.join(","),
             self.block_games as u8,
             self.allowed_games.join(","),
+            self.copy_snips as u8,
             self.shown_intro as u8
         );
         let p = path();
