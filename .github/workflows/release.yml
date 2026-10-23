@@ -1,0 +1,54 @@
+# Builds both binaries on every push; a pushed tag like v0.3.0 also publishes them as a release,
+# with the notes taken from that version's section of CHANGELOG.md.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest # MSVC, whose rc.exe embeds the exe icon and version info
+            file: DontForget.exe
+            asset: DontForget-windows-x86_64.exe
+          - os: ubuntu-22.04 # oldest glibc we support (2.35)
+            file: DontForget
+            asset: DontForget-linux-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --release
+      - run: cargo build --release
+      - name: Name the binary
+        shell: bash
+        run: mv "target/release/${{ matrix.file }}" "${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes from CHANGELOG.md
+        run: awk -v v="${GITHUB_REF_NAME#v}" '/^## /{p = index($0, v) > 0; next} p' CHANGELOG.md > notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Don't Forget ${GITHUB_REF_NAME#v}" --notes-file notes.md

@@ -1,5 +1,6 @@
-// Small GDI / GDI+ helpers: 32-bit DIBs, memory DCs, anti-aliased shapes and the tray icon.
-use std::{mem::{size_of, zeroed}, ptr::null_mut};
+// Small GDI / GDI+ helpers: 32-bit DIBs, memory DCs, anti-aliased shapes, PNG files and the tray icon.
+use crate::common::settings::Outline;
+use std::{mem::{size_of, zeroed}, path::Path, ptr::{null, null_mut}};
 use windows_sys::Win32::{
     Foundation::*,
     Graphics::{Gdi::*, GdiPlus::*},
@@ -49,6 +50,54 @@ impl Dib {
             }
         }
         out
+    }
+
+    /// Writes the image as a PNG.
+    pub fn save_png(&self, path: &Path) -> bool {
+        const PNG_ENCODER: windows_sys::core::GUID = windows_sys::core::GUID::from_u128(0x557cf406_1a04_11d3_9a73_0000f81ef32e);
+        const PIXEL_FORMAT_32BPP_RGB: i32 = 0x0002_2009;
+        let file = super::wide(&path.to_string_lossy());
+        unsafe {
+            let mut bmp = null_mut();
+            GdiFlush();
+            if GdipCreateBitmapFromScan0(self.w, self.h, self.w * 4, PIXEL_FORMAT_32BPP_RGB, self.bits.cast(), &mut bmp) != 0 {
+                return false;
+            }
+            let ok = GdipSaveImageToFile(bmp.cast(), file.as_ptr(), &PNG_ENCODER, null()) == 0;
+            GdipDisposeImage(bmp.cast());
+            ok
+        }
+    }
+
+    /// Reads a PNG (or any image GDI+ knows) back into an opaque DIB.
+    pub fn load_png(path: &Path) -> Option<Dib> {
+        const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
+        let file = super::wide(&path.to_string_lossy());
+        unsafe {
+            let mut bmp = null_mut();
+            if GdipCreateBitmapFromFile(file.as_ptr(), &mut bmp) != 0 {
+                return None;
+            }
+            let mut data: BitmapData = zeroed();
+            let mut out = None;
+            if GdipBitmapLockBits(bmp, null(), ImageLockModeRead as u32, PIXEL_FORMAT_32BPP_ARGB, &mut data) == 0 {
+                let (w, h) = (data.Width as i32, data.Height as i32);
+                if w > 0 && h > 0 {
+                    let dib = Dib::new(w, h);
+                    let dst = dib.pixels();
+                    for row in 0..h as usize {
+                        let src = std::slice::from_raw_parts((data.Scan0 as *const u8).offset(row as isize * data.Stride as isize) as *const u32, w as usize);
+                        for (d, s) in dst[row * w as usize..(row + 1) * w as usize].iter_mut().zip(src) {
+                            *d = s | 0xFF00_0000;
+                        }
+                    }
+                    out = Some(dib);
+                }
+                GdipBitmapUnlockBits(bmp, &mut data);
+            }
+            GdipDisposeImage(bmp.cast());
+            out
+        }
     }
 }
 
@@ -168,12 +217,21 @@ impl Gfx {
         }
     }
 
-    pub fn round_rect(&self, argb: u32, width: f32, x: i32, y: i32, w: i32, h: i32, radius: i32) {
+    /// Rounded rectangle outline, solid, dashed or dotted (dash lengths are in multiples of the width).
+    pub fn outline(&self, argb: u32, width: f32, style: Outline, x: f32, y: f32, w: f32, h: f32, radius: f32) {
         unsafe {
             let mut path = null_mut();
             GdipCreatePath(FillModeAlternate, &mut path);
-            Self::add_round_figure(path, x, y, w, h, radius);
+            Self::add_round_figure_f(path, x, y, w, h, radius);
             let pen = Self::pen(argb, width);
+            let dashes: &[f32] = match style {
+                Outline::Solid => &[],
+                Outline::Dashed => &[3.0, 2.0],
+                Outline::Dotted => &[1.0, 1.0],
+            };
+            if !dashes.is_empty() {
+                GdipSetPenDashArray(pen, dashes.as_ptr(), dashes.len() as i32);
+            }
             GdipDrawPath(self.0, pen, path);
             GdipDeletePen(pen);
             GdipDeletePath(path);
@@ -247,13 +305,15 @@ pub fn intersect(a: &RECT, b: &RECT) -> Option<RECT> {
     (r.right > r.left && r.bottom > r.top).then_some(r)
 }
 
-pub fn draw_label(dc: HDC, font: HFONT, text: &str, x: i32, y: i32) {
+/// A dark pill with white text just above (x, y): starting at x, or centered on it.
+pub fn draw_label(dc: HDC, font: HFONT, text: &str, x: i32, y: i32, centered: bool) {
     unsafe {
         let mut wide: Vec<u16> = text.encode_utf16().collect();
         let old = SelectObject(dc, font);
         let mut m = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         DrawTextW(dc, wide.as_mut_ptr(), wide.len() as i32, &mut m, DT_CALCRECT | DT_SINGLELINE);
         let (tw, th) = (m.right + m.bottom + 4, m.bottom + 8);
+        let x = if centered { x - tw / 2 } else { x };
         let mut bx = rect(x, (y - th - 8).max(0), tw, th);
         // rounded pill, like modern snipping tools
         Gfx::new(dc).fill_round_rect(0xEB1C1C1E, bx.left, bx.top, tw, th, th / 2);

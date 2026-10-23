@@ -5,9 +5,10 @@ pub const BORDER: i32 = 2;
 const IMAGE_RADIUS: f32 = 6.0;
 pub const WINDOW_RADIUS: i32 = 8;
 
-/// Note frame colors as (r, g, b): left-to-right snips are green, right-to-left blue.
-pub const GREEN: (u8, u8, u8) = (46, 204, 113);
-pub const BLUE: (u8, u8, u8) = (52, 152, 255);
+/// 0xRRGGBB (as in the settings file) -> (r, g, b).
+pub fn split(rgb: u32) -> (u8, u8, u8) {
+    ((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
 
 /// An opaque image, one u32 per pixel as 0x00RRGGBB (BGRX bytes on little-endian).
 #[derive(Clone)]

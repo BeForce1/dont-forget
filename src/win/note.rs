@@ -1,17 +1,18 @@
 // One floating note: a snipped piece of the screen that is pinned somewhere or rides next to the cursor.
 use super::{gfx::*, wide};
-use crate::common::anim::{self, *};
+use crate::common::{anim::{self, *}, settings::Outline};
 use std::{cell::Cell, mem::{size_of, zeroed}, ptr::{null, null_mut}};
 use windows_sys::Win32::{
     Foundation::*,
     Graphics::{Dwm::*, Gdi::*},
     System::{DataExchange::*, Memory::*},
-    UI::{HiDpi::GetDpiForWindow, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+    UI::{HiDpi::*, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 
-pub const BORDER: i32 = 2;
 /// Corner radius of the screenshot inside the frame.
 const IMAGE_RADIUS: i32 = 6;
+/// What shows between the dashes of a dashed or dotted frame.
+const GAP_COLOR: u32 = 0x1C1C1E;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const CLASS: &str = "DontForgetNote";
 const OPACITIES: [u32; 5] = [100, 85, 70, 50, 30];
@@ -19,6 +20,68 @@ const SIZES: [u32; 5] = [50, 75, 100, 150, 200];
 
 // The animation timer only runs while something is moving.
 const ANIM_TIMER: usize = 1;
+
+/// Left-to-right snip, or a right-to-left one that was added to the stack. Picks the frame color.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Kind {
+    Snip,
+    Add,
+}
+
+/// How every note frame (and the selection outline) looks. Colors are 0xRRGGBB.
+#[derive(Clone, Copy)]
+pub struct Style {
+    pub snip: u32,
+    pub add: u32,
+    pub outline: Outline,
+    pub width: u32,
+}
+
+impl Style {
+    pub fn color(&self, kind: Kind) -> u32 {
+        if kind == Kind::Add { self.add } else { self.snip }
+    }
+}
+
+thread_local! {
+    static STYLE: Cell<Style> = const { Cell::new(Style { snip: 0xFFB400, add: 0x9B7BFF, outline: Outline::Solid, width: 2 }) };
+}
+
+pub fn style() -> Style {
+    STYLE.with(|s| s.get())
+}
+
+pub fn set_style(style: Style) {
+    STYLE.with(|s| s.set(style));
+}
+
+/// 0xRRGGBB -> GDI COLORREF (0x00BBGGRR).
+pub fn colorref(rgb: u32) -> u32 {
+    (rgb & 0xFF) << 16 | (rgb & 0xFF00) | (rgb >> 16 & 0xFF)
+}
+
+/// Frame thickness in device pixels at the given DPI.
+pub fn border_at(dpi: u32) -> i32 {
+    (style().width as f32 * dpi as f32 / 96.0).round().max(1.0) as i32
+}
+
+/// DPI of the monitor showing a point.
+pub fn dpi_at(p: POINT) -> u32 {
+    let (mut x, mut y) = (96, 96);
+    unsafe { GetDpiForMonitor(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), MDT_EFFECTIVE_DPI, &mut x, &mut y) };
+    x.max(48)
+}
+
+/// What it takes to bring a note back: the image file is `<id>.png`, (x, y) is the image's top-left.
+#[derive(Clone, Copy)]
+pub struct Saved {
+    pub id: u64,
+    pub x: i32,
+    pub y: i32,
+    pub scale: f32,
+    pub opacity: u32,
+    pub kind: Kind,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -28,8 +91,9 @@ pub enum Mode {
 }
 
 struct Note {
+    id: u64,
     image: Dib,
-    edge: (u32, u32), // (GDI+ ARGB, GDI COLORREF)
+    kind: Kind,
     scale: Cell<f32>,
     opacity: Cell<u32>,
     mode: Cell<Mode>,
@@ -47,6 +111,8 @@ struct Note {
     button: Cell<f32>,
     button_hot: Cell<f32>,
     animating: Cell<bool>,
+    /// Sub-pixel part of the position while resizing around the center, so rounding doesn't creep.
+    frac: Cell<(f32, f32)>,
 }
 
 fn get(hwnd: HWND) -> Option<&'static Note> {
@@ -73,14 +139,20 @@ pub fn register(inst: HINSTANCE) {
     }
 }
 
-pub fn create(image: Dib, x: i32, y: i32, edge: (u32, u32)) -> HWND {
-    let (w, h) = (image.w + 2 * BORDER, image.h + 2 * BORDER);
+/// Opens a note whose image sits with its top-left corner at (x, y) on screen.
+pub fn create(image: Dib, x: i32, y: i32, kind: Kind, id: u64, scale: f32, opacity: u32) -> HWND {
+    let b = border_at(dpi_at(POINT { x, y }));
+    let scale = scale.clamp(0.2, 4.0);
+    let w = (image.w as f32 * scale).round() as i32 + 2 * b;
+    let h = (image.h as f32 * scale).round() as i32 + 2 * b;
+    let (x, y) = (x - b, y - b);
     let origin = POINT { x: 0, y: 0 };
     let note = Box::new(Note {
+        id,
         image,
-        edge,
-        scale: Cell::new(1.0),
-        opacity: Cell::new(100),
+        kind,
+        scale: Cell::new(scale),
+        opacity: Cell::new(opacity.clamp(10, 100)),
         mode: Cell::new(Mode::Pinned),
         hover: Cell::new(false),
         close_hot: Cell::new(false),
@@ -95,6 +167,7 @@ pub fn create(image: Dib, x: i32, y: i32, edge: (u32, u32)) -> HWND {
         button: Cell::new(0.0),
         button_hot: Cell::new(0.0),
         animating: Cell::new(false),
+        frac: Cell::new((0.0, 0.0)),
     });
     unsafe {
         let (class, title) = (wide(CLASS), wide("Don't Forget note"));
@@ -111,12 +184,62 @@ pub fn create(image: Dib, x: i32, y: i32, edge: (u32, u32)) -> HWND {
         // Windows 11 rounded corners with a matching border that follows the curve.
         let round = DWMWCP_ROUND;
         DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, (&round as *const i32).cast(), 4);
-        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, (&edge.1 as *const u32).cast(), 4);
+        apply_border_color(hwnd);
         apply_geometry(hwnd, true);
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         animate(hwnd);
         hwnd
     }
+}
+
+/// The DWM outline follows the rounded corners; it takes the frame color, or stays off when dashed.
+fn apply_border_color(hwnd: HWND) {
+    let Some(n) = get(hwnd) else { return };
+    let st = style();
+    let color = if st.outline == Outline::Solid { colorref(st.color(n.kind)) } else { 0xFFFF_FFFE /* DWMWA_COLOR_NONE */ };
+    unsafe { DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR as u32, (&color as *const u32).cast(), 4) };
+}
+
+/// Re-applies the current style (colors, outline, thickness) to an open note.
+pub fn restyle(hwnd: HWND) {
+    apply_border_color(hwnd);
+    apply_geometry(hwnd, true);
+    unsafe { InvalidateRect(hwnd, null(), 0) };
+}
+
+/// Where the note is and how it looks, measured from its center so a running animation can't skew it.
+pub fn saved(hwnd: HWND) -> Option<Saved> {
+    let n = get(hwnd)?;
+    let mut r: RECT = unsafe { zeroed() };
+    unsafe { GetWindowRect(hwnd, &mut r) };
+    let s = n.scale.get();
+    let (w, h) = ((n.image.w as f32 * s).round() as i32, (n.image.h as f32 * s).round() as i32);
+    let (cx, cy) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+    Some(Saved { id: n.id, x: cx - w / 2, y: cy - h / 2, scale: s, opacity: n.opacity.get(), kind: n.kind })
+}
+
+/// The window rectangle the note has once any animation settles.
+pub fn full_rect(hwnd: HWND) -> Option<RECT> {
+    let s = saved(hwnd)?;
+    let n = get(hwnd)?;
+    let b = border(hwnd);
+    let (w, h) = ((n.image.w as f32 * s.scale).round() as i32, (n.image.h as f32 * s.scale).round() as i32);
+    Some(rect(s.x - b, s.y - b, w + 2 * b, h + 2 * b))
+}
+
+/// Moves the note so that its settled rectangle starts at (x, y), even mid-animation.
+pub fn move_full_to(hwnd: HWND, x: i32, y: i32) {
+    let Some(full) = full_rect(hwnd) else { return };
+    let mut r: RECT = unsafe { zeroed() };
+    unsafe {
+        GetWindowRect(hwnd, &mut r);
+        SetWindowPos(hwnd, null_mut(), r.left + x - full.left, r.top + y - full.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+/// Gone, or already fading out.
+pub fn is_closing(hwnd: HWND) -> bool {
+    get(hwnd).is_none_or(|n| n.closing.get().is_some())
 }
 
 pub fn set_mode(hwnd: HWND, mode: Mode) {
@@ -129,9 +252,13 @@ pub fn set_mode(hwnd: HWND, mode: Mode) {
     n.click_through.set(mode != Mode::Pinned);
     apply_style(hwnd);
     super::on_mode_changed(hwnd, mode);
+    if mode == Mode::Pinned {
+        super::notes_changed();
+    }
 }
 
-/// Fades and shrinks the note away, then destroys it.
+/// Fades and shrinks the note away, then destroys it. Deleting goes through `super::delete_notes`,
+/// which keeps a copy for undo first.
 pub fn close(hwnd: HWND) {
     let Some(n) = get(hwnd) else { return };
     if n.closing.get().is_some() {
@@ -217,8 +344,9 @@ fn apply_style(hwnd: HWND) {
 fn apply_geometry(hwnd: HWND, keep_center: bool) {
     let Some(n) = get(hwnd) else { return };
     let s = n.scale.get() * anim_values(n).0;
-    let w = (n.image.w as f32 * s).round().max(1.0) as i32 + 2 * BORDER;
-    let h = (n.image.h as f32 * s).round().max(1.0) as i32 + 2 * BORDER;
+    let b = border(hwnd);
+    let w = (n.image.w as f32 * s).round().max(1.0) as i32 + 2 * b;
+    let h = (n.image.h as f32 * s).round().max(1.0) as i32 + 2 * b;
     unsafe {
         let mut r: RECT = zeroed();
         GetWindowRect(hwnd, &mut r);
@@ -226,7 +354,16 @@ fn apply_geometry(hwnd: HWND, keep_center: bool) {
         if cw == w && ch == h {
             return;
         }
-        let (x, y) = if keep_center { (r.left + (cw - w) / 2, r.top + (ch - h) / 2) } else { (r.left, r.top) };
+        let (x, y) = if keep_center {
+            let (fx, fy) = n.frac.get();
+            let (lx, ly) = (r.left as f32 + fx + (cw - w) as f32 / 2.0, r.top as f32 + fy + (ch - h) as f32 / 2.0);
+            let (x, y) = (lx.floor(), ly.floor());
+            n.frac.set((lx - x, ly - y));
+            (x as i32, y as i32)
+        } else {
+            n.frac.set((0.0, 0.0));
+            (r.left, r.top)
+        };
         SetWindowPos(hwnd, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
         InvalidateRect(hwnd, null(), 0);
     }
@@ -236,6 +373,14 @@ fn set_scale(hwnd: HWND, scale: f32) {
     let Some(n) = get(hwnd) else { return };
     n.scale.set(scale.clamp(0.2, 4.0));
     apply_geometry(hwnd, false);
+    super::notes_changed();
+}
+
+fn set_opacity(hwnd: HWND, opacity: u32) {
+    let Some(n) = get(hwnd) else { return };
+    n.opacity.set(opacity);
+    apply_style(hwnd);
+    super::notes_changed();
 }
 
 fn client_size(hwnd: HWND) -> (i32, i32) {
@@ -248,10 +393,14 @@ fn dpi_scale(hwnd: HWND) -> f32 {
     unsafe { GetDpiForWindow(hwnd) as f32 / 96.0 }
 }
 
+fn border(hwnd: HWND) -> i32 {
+    border_at(unsafe { GetDpiForWindow(hwnd) })
+}
+
 /// The close button: a rounded square, inset the same distance from the top and right edges.
 fn close_rect(hwnd: HWND) -> RECT {
     let k = dpi_scale(hwnd);
-    let (size, margin) = ((22.0 * k).round() as i32, (BORDER as f32 + 6.0 * k).round() as i32);
+    let (size, margin) = ((22.0 * k).round() as i32, (border(hwnd) as f32 + 6.0 * k).round() as i32);
     rect(client_size(hwnd).0 - margin - size, margin, size, size)
 }
 
@@ -281,25 +430,34 @@ fn paint(hwnd: HWND, n: &Note) {
         let mut ps: PAINTSTRUCT = zeroed();
         let hdc = BeginPaint(hwnd, &mut ps);
         let (cw, ch) = client_size(hwnd);
+        let b = border(hwnd);
+        let st = style();
+        let color = st.color(n.kind);
+        let back_color = if st.outline == Outline::Solid { color } else { GAP_COLOR };
         let back = Dib::new(cw, ch);
         let bdc = MemDc::new(back.bmp);
-        let brush = CreateSolidBrush(n.edge.1);
+        let brush = CreateSolidBrush(colorref(back_color));
         FillRect(bdc.dc, &rect(0, 0, cw, ch), brush);
         DeleteObject(brush);
 
         let src = MemDc::new(n.image.bmp);
-        let (iw, ih) = (cw - 2 * BORDER, ch - 2 * BORDER);
+        let (iw, ih) = (cw - 2 * b, ch - 2 * b);
         if iw == n.image.w && ih == n.image.h {
-            BitBlt(bdc.dc, BORDER, BORDER, iw, ih, src.dc, 0, 0, SRCCOPY);
+            BitBlt(bdc.dc, b, b, iw, ih, src.dc, 0, 0, SRCCOPY);
         } else {
             SetStretchBltMode(bdc.dc, HALFTONE);
             SetBrushOrgEx(bdc.dc, 0, 0, null_mut());
-            StretchBlt(bdc.dc, BORDER, BORDER, iw, ih, src.dc, 0, 0, n.image.w, n.image.h, SRCCOPY);
+            StretchBlt(bdc.dc, b, b, iw, ih, src.dc, 0, 0, n.image.w, n.image.h, SRCCOPY);
         }
         drop(src);
 
         let g = Gfx::new(bdc.dc);
-        g.round_corners(n.edge.0, BORDER, BORDER, iw, ih, IMAGE_RADIUS);
+        g.round_corners(0xFF00_0000 | back_color, b, b, iw, ih, IMAGE_RADIUS);
+        if st.outline != Outline::Solid {
+            // centered on the frame, following the window's own rounded corners (8 px at 100%)
+            let (half, k) = (b as f32 / 2.0, dpi_scale(hwnd));
+            g.outline(0xFF00_0000 | color, b as f32, st.outline, half, half, (cw - b) as f32, (ch - b) as f32, (8.0 * k - half).max(1.0));
+        }
 
         let shown = ease_out_cubic(n.button.get());
         if shown > 0.01 && has_room_for_close(hwnd) {
@@ -360,13 +518,10 @@ fn menu(hwnd: HWND) {
         match cmd {
             1 => set_mode(hwnd, Mode::Follow),
             2 => set_mode(hwnd, Mode::Pinned),
-            10..=14 => {
-                n.opacity.set(OPACITIES[cmd - 10]);
-                apply_style(hwnd);
-            }
+            10..=14 => set_opacity(hwnd, OPACITIES[cmd - 10]),
             20..=24 => set_scale(hwnd, SIZES[cmd - 20] as f32 / 100.0),
             30 => copy_image(&n.image),
-            40 => close(hwnd),
+            40 => super::delete_notes(vec![hwnd]),
             41 => super::clear_all(),
             _ => {}
         }
@@ -477,10 +632,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_LBUTTONUP => {
             if n.left_down.replace(false) {
                 ReleaseCapture();
-                if !n.dragged.get() {
+                if n.dragged.get() {
+                    super::notes_changed();
+                } else {
                     let (x, y) = mouse_pos(lparam);
                     if over_close(hwnd, x, y) {
-                        close(hwnd);
+                        super::delete_notes(vec![hwnd]);
                     } else {
                         menu(hwnd);
                     }
@@ -488,6 +645,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
         }
         WM_RBUTTONUP => menu(hwnd),
+        WM_DPICHANGED => restyle(hwnd), // frame and × button follow the new monitor's scaling
         WM_MOUSEWHEEL => {
             let delta = ((wparam >> 16) & 0xFFFF) as i16;
             set_scale(hwnd, n.scale.get() * if delta > 0 { 1.1 } else { 1.0 / 1.1 });

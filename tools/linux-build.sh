@@ -5,7 +5,7 @@ set -euo pipefail
 src="$(cd "$(dirname "$0")/.." && pwd)"
 work=/root/dont-forget
 mkdir -p "$work"
-cp -r "$src/Cargo.toml" "$src/Cargo.lock" "$work/"
+cp -r "$src/Cargo.toml" "$src/Cargo.lock" "$src/build.rs" "$work/"
 rm -rf "$work/src" && cp -r "$src/src" "$work/src"
 . /root/.cargo/env
 cd "$work"

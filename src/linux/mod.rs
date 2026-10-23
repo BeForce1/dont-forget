@@ -462,7 +462,8 @@ impl App {
     fn begin_select(&mut self) -> Res<()> {
         let Press::Pending { x, y, .. } = self.press else { return Ok(()) };
         self.press = Press::Selecting;
-        let ov = Overlay::open(&self.conn, self.root, self.depth, self.visual, self.screen, (x as i32, y as i32))?;
+        let colors = (self.settings.snip_color, self.settings.add_color);
+        let ov = Overlay::open(&self.conn, self.root, self.depth, self.visual, self.screen, (x as i32, y as i32), colors)?;
         let mask = EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION;
         self.conn.change_active_pointer_grab(self.crosshair, CURRENT_TIME, mask)?;
         self.overlay = Some(ov);
@@ -522,7 +523,7 @@ impl App {
         self.notes.push(Note {
             win,
             image,
-            edge: if additive { draw::BLUE } else { draw::GREEN },
+            edge: draw::split(if additive { self.settings.add_color } else { self.settings.snip_color }),
             scale: 1.0,
             mode: Mode::Pinned,
             pos,

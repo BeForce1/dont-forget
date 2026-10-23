@@ -16,14 +16,11 @@ pub struct Overlay {
     outline: Gcontext,
     text: Gcontext,
     font: Font,
-}
-
-fn rgb(c: (u8, u8, u8)) -> u32 {
-    (c.0 as u32) << 16 | (c.1 as u32) << 8 | c.2 as u32
+    colors: (u32, u32), // 0xRRGGBB outline of a left-to-right and a right-to-left selection
 }
 
 impl Overlay {
-    pub fn open(conn: &Conn, root: Window, depth: u8, visual: Visualid, screen: (i32, i32), start: (i32, i32)) -> Res<Overlay> {
+    pub fn open(conn: &Conn, root: Window, depth: u8, visual: Visualid, screen: (i32, i32), start: (i32, i32), colors: (u32, u32)) -> Res<Overlay> {
         let (w, h) = screen;
         let mut data = conn.get_image(ImageFormat::Z_PIXMAP, root, 0, 0, w as u16, h as u16, !0)?.reply()?.data;
         let shot = draw::from_bgrx(&data, w as u32, h as u32).ok_or("screenshot failed")?;
@@ -65,7 +62,7 @@ impl Overlay {
         conn.create_gc(text, root, &CreateGCAux::new().font(font).foreground(0xffffff).background(0x1c1c1e))?;
         conn.map_window(win)?;
         conn.configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))?;
-        let ov = Overlay { win, start, cur: start, screen, shot, bright, dim, gc, outline, text, font };
+        let ov = Overlay { win, start, cur: start, screen, shot, bright, dim, gc, outline, text, font, colors };
         Ok(ov)
     }
 
@@ -113,8 +110,8 @@ impl Overlay {
             return Ok(());
         }
         conn.copy_area(self.bright, self.win, self.gc, sx as i16, sy as i16, sx as i16, sy as i16, sw as u16, sh as u16)?;
-        let color = if self.cur.0 < self.start.0 { draw::BLUE } else { draw::GREEN };
-        conn.change_gc(self.outline, &ChangeGCAux::new().foreground(rgb(color)))?;
+        let color = if self.cur.0 < self.start.0 { self.colors.1 } else { self.colors.0 };
+        conn.change_gc(self.outline, &ChangeGCAux::new().foreground(color))?;
         let outline = Rectangle { x: (sx - 1) as i16, y: (sy - 1) as i16, width: (sw + 1) as u16, height: (sh + 1) as u16 };
         conn.poly_rectangle(self.win, self.outline, &[outline])?;
         let label = format!(" {sw} x {sh} ");

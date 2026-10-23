@@ -27,6 +27,8 @@ pub static DROP_ARMED: AtomicBool = AtomicBool::new(false);
 /// While notes follow the cursor, a quick wheel click releases them instead of reaching the app.
 pub static FOLLOW_ARMED: AtomicBool = AtomicBool::new(false);
 pub static PAUSED: AtomicBool = AtomicBool::new(false);
+/// The snip shortcut opened the overlay: the mouse belongs to it until it closes.
+pub static KEY_SELECT: AtomicBool = AtomicBool::new(false);
 pub static HOLD_MS: AtomicU32 = AtomicU32::new(250);
 pub static NOTES: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 pub static IGNORED: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -105,7 +107,7 @@ pub fn is_note(hwnd: HWND) -> bool {
 }
 
 unsafe extern "system" fn callback(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0 && !PAUSED.load(Ordering::Relaxed) {
+    if code >= 0 && !PAUSED.load(Ordering::Relaxed) && !KEY_SELECT.load(Ordering::Relaxed) {
         let m = &*(lparam as *const MSLLHOOKSTRUCT);
         if m.dwExtraInfo != MAGIC && HOOK.with(|h| handle(&mut h.borrow_mut(), wparam as u32, m.pt)) {
             return 1;

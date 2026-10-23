@@ -30,6 +30,15 @@ public delegate bool EnumProc(IntPtr h, IntPtr l);
 [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc p, IntPtr l);
 [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
 [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string title);
+[DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+// The app's hidden main window: WM_CLOSE quits it with the notes saved, WM_APP+11 re-reads settings.ini.
+public static bool Post(uint msg) {
+    var h = FindWindow("DontForgetMain", null);
+    return h != IntPtr.Zero && PostMessage(h, msg, IntPtr.Zero, IntPtr.Zero);
+}
+public static bool CloseApp() { return Post(0x0010); }
+public static bool Reload() { return Post(0x8000 + 11); }
 public static int CountNotes() {
     int c = 0;
     EnumWindows((h, _) => {
@@ -47,9 +56,39 @@ public static int CountNotes() {
 
 $AfterModes = [ordered]@{ follow = 'Follow my mouse'; drop = 'Follow until I click'; stay = 'Stay where I snipped' }
 $HoldTimes = 150, 250, 400, 600
+# Same presets as the app (src/common/settings.rs): name = snip color, add color
+$Palettes = [ordered]@{
+    'Amber and violet' = '#FFB400', '#9B7BFF'
+    'Green and blue'   = '#2ECC71', '#3498FF'
+    'Coral and teal'   = '#FF6B6B', '#2EC4B6'
+    'White and gray'   = '#F2F2F2', '#8E8E93'
+}
+$Outlines = 'solid', 'dashed', 'dotted'
+$Widths = 1, 2, 3, 4, 6
+
+# Every key the app knows, in file order, with its comment and default.
+$Keys = [ordered]@{
+    after_capture = 'follow', 'follow | drop | stay'
+    hold_ms       = '250', 'how long to hold the wheel before snipping'
+    ignored_apps  = 'SLDWORKS,blender,FreeCAD,acad', 'process names where the wheel is left alone'
+    ignored_sites = '', 'websites where it is off, e.g. youtube.com'
+    block_games   = '1', '1 = off in games unless listed in allowed_games'
+    allowed_games = '', 'games where it still works'
+    copy_snips    = '1', '1 = every new snip is also copied to the clipboard'
+    keep_notes    = '1', '1 = notes come back after a restart'
+    snip_color    = '#FFB400', 'frame of a left-to-right snip'
+    add_color     = '#9B7BFF', 'frame of a right-to-left snip (adds to the stack)'
+    outline       = 'solid', 'solid | dashed | dotted'
+    outline_width = '2', '1 to 6 pixels'
+    snip_key      = 'Ctrl+Alt+S', 'snip with the keyboard, then drag with the left button'
+    hide_key      = 'Ctrl+Alt+H', 'hide or show all notes'
+    restore_key   = 'Ctrl+Alt+Z', 'bring back the last deleted note'
+    shown_intro   = '0', ''
+}
 
 function Read-Settings {
-    $s = [ordered]@{ after_capture = 'follow'; hold_ms = '250'; ignored_apps = 'SLDWORKS,blender,FreeCAD,acad'; ignored_sites = ''; block_games = '1'; allowed_games = ''; copy_snips = '1'; shown_intro = '0' }
+    $s = [ordered]@{}
+    foreach ($k in $Keys.Keys) { $s[$k] = $Keys[$k][0] }
     if (Test-Path $SettingsPath) {
         foreach ($line in Get-Content $SettingsPath) {
             if ($line -match '^\s*([a-z_]+)\s*=\s*([^;]*)') { $s[$Matches[1]] = $Matches[2].Trim() }
@@ -60,17 +99,11 @@ function Read-Settings {
 
 function Save-Settings($s) {
     New-Item -ItemType Directory -Force (Split-Path $SettingsPath) | Out-Null
-    $lines = @(
-        "; Don't Forget settings. Changes apply when you close Notepad."
-        "after_capture=$($s.after_capture)   ; follow | drop | stay"
-        "hold_ms=$($s.hold_ms)   ; how long to hold the wheel before snipping"
-        "ignored_apps=$($s.ignored_apps)   ; process names where the wheel is left alone"
-        "ignored_sites=$($s.ignored_sites)   ; websites where it is off, e.g. youtube.com"
-        "block_games=$($s.block_games)   ; 1 = off in games unless listed in allowed_games"
-        "allowed_games=$($s.allowed_games)   ; games where it still works"
-        "copy_snips=$($s.copy_snips)   ; 1 = every new snip is also copied to the clipboard"
-        "shown_intro=$($s.shown_intro)"
-    )
+    $lines = @("; Don't Forget settings. Changes apply when you close Notepad.")
+    foreach ($k in $s.Keys) {
+        $note = if ($Keys.Contains($k) -and $Keys[$k][1]) { "   ; $($Keys[$k][1])" } else { '' }
+        $lines += "$k=$($s[$k])$note"
+    }
     [IO.File]::WriteAllText($SettingsPath, ($lines -join "`n") + "`n")   # LF, like the app writes
 }
 
@@ -114,12 +147,15 @@ function Stop-App([switch]$Quiet) {
     $p = Get-AppProcess
     if (-not $p) { if (-not $Quiet) { Say 'Not running.' $C.Dim }; return $true }
     $notes = [DontForget.Win]::CountNotes()
-    if ($notes -gt 0 -and -not (Confirm-Key "$notes note(s) open will be lost. Stop anyway?")) {
+    if ($notes -gt 0 -and (Read-Settings).keep_notes -eq '0' -and -not (Confirm-Key "$notes note(s) open will be lost (Keep notes is off). Stop anyway?")) {
         Say 'Kept running.' $C.Dim
         return $false
     }
-    Stop-Process -Id $p.Id   # by PID only, never by image name
-    $p.WaitForExit(3000) | Out-Null
+    # ask it to quit so it saves its notes; force it only if it doesn't answer
+    if (-not ([DontForget.Win]::CloseApp() -and $p.WaitForExit(3000))) {
+        Stop-Process -Id $p.Id   # by PID only, never by image name
+        $p.WaitForExit(3000) | Out-Null
+    }
     if (-not $Quiet) { Say 'Stopped. The mouse wheel is back to normal.' }
     $true
 }
@@ -138,11 +174,17 @@ function Switch-Startup {
     }
 }
 
+# Tells a running app to re-read the file; returns the message to show.
+function Send-Reload($saved = 'Saved') {
+    if (-not (Get-AppProcess)) { return "$saved." }
+    if ([DontForget.Win]::Reload()) { "$saved and applied." } else { "$saved. Restart the app to apply it." }
+}
+
 function Set-Setting($name, $value) {
     $s = Read-Settings
     $s[$name] = "$value"
     Save-Settings $s
-    if (Get-AppProcess) { Say 'Saved. Restart the app to apply it.' $C.Amber } else { Say 'Saved.' }
+    Say (Send-Reload)
 }
 
 function Switch-Games {
@@ -151,6 +193,48 @@ function Switch-Games {
 
 function Switch-Copy {
     Set-Setting copy_snips $(if ((Read-Settings).copy_snips -ne '0') { '0' } else { '1' })
+}
+
+function Switch-Keep {
+    Set-Setting keep_notes $(if ((Read-Settings).keep_notes -ne '0') { '0' } else { '1' })
+}
+
+function Get-PaletteName($s) {
+    foreach ($name in $Palettes.Keys) {
+        if ($s.snip_color -eq $Palettes[$name][0] -and $s.add_color -eq $Palettes[$name][1]) { return $name }
+    }
+    'Custom'
+}
+
+function Step-Palette($dir) {
+    $names = @($Palettes.Keys)
+    $i = [array]::IndexOf($names, (Get-PaletteName (Read-Settings)))
+    if ($i -lt 0 -and $dir -lt 0) { $i = 0 }
+    $name = $names[($i + $dir + $names.Count) % $names.Count]
+    $s = Read-Settings
+    $s.snip_color, $s.add_color = $Palettes[$name]
+    Save-Settings $s
+    Say (Send-Reload)
+}
+
+function Step-Outline($dir) {
+    $i = [array]::IndexOf($Outlines, (Read-Settings).outline)
+    Set-Setting outline $Outlines[($i + $dir + $Outlines.Count) % $Outlines.Count]
+}
+
+function Step-Width($dir) {
+    $w = 0
+    [void][int]::TryParse((Read-Settings).outline_width, [ref]$w)
+    $i = [array]::IndexOf($Widths, $w)
+    if ($i -lt 0) { $i = 1 }
+    Set-Setting outline_width $Widths[[math]::Clamp($i + $dir, 0, $Widths.Count - 1)]
+}
+
+# A color swatch in the terminal: "#FFB400" -> ■ in that color
+function Get-Swatch($hex) {
+    if ($hex -notmatch '^#?([0-9a-fA-F]{6})$') { return '?' }
+    $v = [Convert]::ToInt32($Matches[1], 16)
+    "$E[38;2;$(($v -shr 16) -band 255);$(($v -shr 8) -band 255);$($v -band 255)m■$($C.Reset)"
 }
 
 function Step-After($dir) {
@@ -349,8 +433,8 @@ function Edit-Exceptions {
     $s.allowed_games = (@($allowed) | Sort-Object) -join ','
     $s.ignored_sites = $sites -join ','
     Save-Settings $s
-    $msg = "Saved: $($checked.Count) app$(if ($checked.Count -ne 1) { 's' }) off, $($allowed.Count) game$(if ($allowed.Count -ne 1) { 's' }) on, $($sites.Count) website$(if ($sites.Count -ne 1) { 's' }) off."
-    if (Get-AppProcess) { Say "$msg Restart the app to apply." $C.Amber } else { Say $msg }
+    $msg = "Saved: $($checked.Count) app$(if ($checked.Count -ne 1) { 's' }) off, $($allowed.Count) game$(if ($allowed.Count -ne 1) { 's' }) on, $($sites.Count) website$(if ($sites.Count -ne 1) { 's' }) off"
+    Say (Send-Reload $msg)
     Clear-Host
 }
 
@@ -386,6 +470,10 @@ $Items = @(
             "Games                $($C.Blue)‹ $text ›$($C.Reset)" }
         Run = { Switch-Games }; Step = { Switch-Games } }
     @{ Key = 'C'; Label = { param($s) "Copy snips           $(if ($s.Settings.copy_snips -ne '0') { "$($C.Green)on" } else { "$($C.Dim)off" })$($C.Reset)" }; Run = { Switch-Copy }; Step = { Switch-Copy } }
+    @{ Key = 'K'; Label = { param($s) "Keep notes           $(if ($s.Settings.keep_notes -ne '0') { "$($C.Green)on$($C.Dim) (they come back after a restart)" } else { "$($C.Dim)off" })$($C.Reset)" }; Run = { Switch-Keep }; Step = { Switch-Keep } }
+    @{ Key = 'L'; Label = { param($s) "Colors               $($C.Blue)‹ $(Get-PaletteName $s.Settings) ›$($C.Reset) $(Get-Swatch $s.Settings.snip_color) $(Get-Swatch $s.Settings.add_color)" }; Run = { Step-Palette 1 }; Step = { param($d) Step-Palette $d } }
+    @{ Key = 'D'; Label = { param($s) "Outline              $($C.Blue)‹ $($s.Settings.outline) ›$($C.Reset)" }; Run = { Step-Outline 1 }; Step = { param($d) Step-Outline $d } }
+    @{ Key = 'T'; Label = { param($s) "Thickness            $($C.Blue)‹ $($s.Settings.outline_width) px ›$($C.Reset)" }; Run = { Step-Width 1 }; Step = { param($d) Step-Width $d } }
     @{ Key = 'I'; Label = { param($s)
             $a = @($s.Settings.ignored_apps -split ',' | Where-Object { $_ }).Count
             $w = @($s.Settings.ignored_sites -split ',' | Where-Object { $_ }).Count
@@ -418,6 +506,8 @@ function Render($s, $sel) {
         else { & $line "     $text  $($C.Dim)$($it.Key)$($C.Reset)" }
     }
     & $line ''
+    $keys = @(@('snip_key', 'snip'), @('hide_key', 'hide'), @('restore_key', 'undo delete') | Where-Object { $s.Settings[$_[0]] } | ForEach-Object { "$($s.Settings[$_[0]]) $($_[1])" })
+    if ($keys) { & $line "  $($C.Dim)Shortcuts: $($keys -join ' · ')  (change them in the settings file)$($C.Reset)" }
     & $line "  $($C.Dim)↑↓ move · Enter run · ←→ change · letter = shortcut · Q quit$($C.Reset)"
     & $line ''
     & $line "  $script:Message"
@@ -429,7 +519,8 @@ function Render($s, $sel) {
 if ($Status) {
     $s = Get-State
     Show-Status $s
-    "  start with Windows: $(if ($s.Startup) { 'on' } else { 'off' }) · after a snip: $($AfterModes[$s.Settings.after_capture]) · hold: $($s.Settings.hold_ms) ms · copy snips: $(if ($s.Settings.copy_snips -ne '0') { 'on' } else { 'off' })"
+    "  start with Windows: $(if ($s.Startup) { 'on' } else { 'off' }) · after a snip: $($AfterModes[$s.Settings.after_capture]) · hold: $($s.Settings.hold_ms) ms · copy snips: $(if ($s.Settings.copy_snips -ne '0') { 'on' } else { 'off' }) · keep notes: $(if ($s.Settings.keep_notes -ne '0') { 'on' } else { 'off' })"
+    "  look: $(Get-PaletteName $s.Settings) ($($s.Settings.snip_color) / $($s.Settings.add_color)), $($s.Settings.outline), $($s.Settings.outline_width) px · shortcuts: snip $($s.Settings.snip_key), hide $($s.Settings.hide_key), undo $($s.Settings.restore_key)"
     "  skipped apps: $($s.Settings.ignored_apps) · skipped sites: $(if ($s.Settings.ignored_sites) { $s.Settings.ignored_sites } else { 'none' })"
     "  games: $(if ($s.Settings.block_games -ne '0') { 'off unless allowed' } else { 'on' }) · allowed games: $(if ($s.Settings.allowed_games) { $s.Settings.allowed_games } else { 'none' })"
     return
