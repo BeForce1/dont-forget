@@ -104,7 +104,7 @@ Run `cargo build --release` with Rust. On Windows, the `x86_64-pc-windows-gnu` t
 | **Mouse** | Any mouse with a clickable scroll wheel (middle button), or a touchpad with the keyboard shortcut. | A mouse with a clickable scroll wheel. |
 | **CPU** | Any 64-bit processor. 0% while idle. | Same, 0% while idle. |
 | **Memory** | About 2 MB idle, or about 3 MB with a websites list, which loads UI Automation. | About 3 MB resident idle. |
-| **Disk** | One exe of about 500 KB, with nothing to install. Saved notes take about as much as PNG screenshots of the same size. | One binary of about 590 KB. |
+| **Disk** | One exe of about 400 KB, with nothing to install. Saved notes take about as much as PNG screenshots of the same size. | One binary of about 590 KB. |
 | **Extras** | PowerShell 7 for the optional control panel. | None. |
 
 Each open note holds its snip as an uncompressed image, so it adds roughly width × height × 4 bytes. An 800×500 snip adds about 1.6 MB.
