@@ -2,6 +2,7 @@
 // Both versions live as server-side pixmaps, so dragging only copies the changed region.
 use super::{draw, put_image, Conn, Res};
 use super::draw::Image;
+use crate::common::settings::Outline;
 use x11rb::{connection::Connection, protocol::xproto::*};
 
 pub struct Overlay {
@@ -17,10 +18,18 @@ pub struct Overlay {
     text: Gcontext,
     font: Font,
     colors: (u32, u32), // 0xRRGGBB outline of a left-to-right and a right-to-left selection
+    width: i32,
+}
+
+/// How the selection outline looks: (snip color, add color) as 0xRRGGBB, style, width in pixels.
+pub struct Style {
+    pub colors: (u32, u32),
+    pub outline: Outline,
+    pub width: u32,
 }
 
 impl Overlay {
-    pub fn open(conn: &Conn, root: Window, depth: u8, visual: Visualid, screen: (i32, i32), start: (i32, i32), colors: (u32, u32)) -> Res<Overlay> {
+    pub fn open(conn: &Conn, root: Window, depth: u8, visual: Visualid, screen: (i32, i32), start: (i32, i32), style: Style) -> Res<Overlay> {
         let (w, h) = screen;
         let mut data = conn.get_image(ImageFormat::Z_PIXMAP, root, 0, 0, w as u16, h as u16, !0)?.reply()?.data;
         let shot = draw::from_bgrx(&data, w as u32, h as u32).ok_or("screenshot failed")?;
@@ -54,15 +63,25 @@ impl Overlay {
             visual,
             &CreateWindowAux::new().override_redirect(1).background_pixmap(dim).event_mask(EventMask::EXPOSURE),
         )?;
+        let width = style.width.max(2);
         let outline = conn.generate_id()?;
-        conn.create_gc(outline, root, &CreateGCAux::new().line_width(2).graphics_exposures(0))?;
+        let line_style = if style.outline == Outline::Solid { LineStyle::SOLID } else { LineStyle::ON_OFF_DASH };
+        conn.create_gc(outline, root, &CreateGCAux::new().line_width(width).line_style(line_style).graphics_exposures(0))?;
+        let dashes = match style.outline {
+            Outline::Dashed => [3 * width, 2 * width],
+            _ => [width, width],
+        };
+        if style.outline != Outline::Solid {
+            conn.set_dashes(outline, 0, &dashes.map(|d| d.min(255) as u8))?;
+        }
         let font = conn.generate_id()?;
         conn.open_font(font, b"fixed")?;
         let text = conn.generate_id()?;
         conn.create_gc(text, root, &CreateGCAux::new().font(font).foreground(0xffffff).background(0x1c1c1e))?;
         conn.map_window(win)?;
         conn.configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))?;
-        let ov = Overlay { win, start, cur: start, screen, shot, bright, dim, gc, outline, text, font, colors };
+        let (colors, width) = (style.colors, width as i32);
+        let ov = Overlay { win, start, cur: start, screen, shot, bright, dim, gc, outline, text, font, colors, width };
         Ok(ov)
     }
 
@@ -91,10 +110,11 @@ impl Overlay {
         self.cur = p;
         let (ax, ay, aw, ah) = self.selection();
         // repaint the union of old and new selection, padded for the outline and the label above it
-        let l = bx.min(ax) - 4;
-        let t = by.min(ay) - 28;
+        let pad = self.width + 4;
+        let l = bx.min(ax) - pad;
+        let t = by.min(ay) - 28 - self.width;
         let r = (bx + bw).max(ax + aw) + 140;
-        let b = (by + bh).max(ay + ah) + 4;
+        let b = (by + bh).max(ay + ah) + pad;
         self.paint(conn, l, t, r - l, b - t)
     }
 
@@ -112,10 +132,13 @@ impl Overlay {
         conn.copy_area(self.bright, self.win, self.gc, sx as i16, sy as i16, sx as i16, sy as i16, sw as u16, sh as u16)?;
         let color = if self.cur.0 < self.start.0 { self.colors.1 } else { self.colors.0 };
         conn.change_gc(self.outline, &ChangeGCAux::new().foreground(color))?;
-        let outline = Rectangle { x: (sx - 1) as i16, y: (sy - 1) as i16, width: (sw + 1) as u16, height: (sh + 1) as u16 };
+        // X centers the line on the rectangle's edge, so push the edge out by half the width
+        let off = (self.width + 1) / 2;
+        let (ow, oh) = (sw + 2 * off - 1, sh + 2 * off - 1);
+        let outline = Rectangle { x: (sx - off) as i16, y: (sy - off) as i16, width: ow as u16, height: oh as u16 };
         conn.poly_rectangle(self.win, self.outline, &[outline])?;
         let label = format!(" {sw} x {sh} ");
-        conn.image_text8(self.win, self.text, sx as i16, (sy - 8).max(12) as i16, label.as_bytes())?;
+        conn.image_text8(self.win, self.text, sx as i16, (sy - 6 - self.width).max(12) as i16, label.as_bytes())?;
         Ok(())
     }
 

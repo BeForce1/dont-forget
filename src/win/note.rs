@@ -21,12 +21,7 @@ const SIZES: [u32; 5] = [50, 75, 100, 150, 200];
 // The animation timer only runs while something is moving.
 const ANIM_TIMER: usize = 1;
 
-/// Left-to-right snip, or a right-to-left one that was added to the stack. Picks the frame color.
-#[derive(Clone, Copy, PartialEq)]
-pub enum Kind {
-    Snip,
-    Add,
-}
+pub use crate::common::store::{Kind, Saved};
 
 /// How every note frame (and the selection outline) looks. Colors are 0xRRGGBB.
 #[derive(Clone, Copy)]
@@ -70,17 +65,6 @@ pub fn dpi_at(p: POINT) -> u32 {
     let (mut x, mut y) = (96, 96);
     unsafe { GetDpiForMonitor(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), MDT_EFFECTIVE_DPI, &mut x, &mut y) };
     x.max(48)
-}
-
-/// What it takes to bring a note back: the image file is `<id>.png`, (x, y) is the image's top-left.
-#[derive(Clone, Copy)]
-pub struct Saved {
-    pub id: u64,
-    pub x: i32,
-    pub y: i32,
-    pub scale: f32,
-    pub opacity: u32,
-    pub kind: Kind,
 }
 
 #[derive(Clone, Copy, PartialEq)]

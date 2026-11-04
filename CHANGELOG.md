@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Linux catches up with Windows**
+- **Notes are kept** on Linux too, as PNGs in `~/.config/dont-forget/notes`, and come back where they were. Notes that were saved off-screen move back onto the screen, also when the screen size changes.
+- **Undo a delete:** **Ctrl+Alt+Z** or `dont-forget --restore`. `--clear` counts as one step, and the last 20 are kept.
+- **Keyboard shortcuts:** **Ctrl+Alt+S** to snip with a left-button drag (Esc or a right click cancels), and **Ctrl+Alt+H** to hide or show all notes. The keys can be changed in the settings file, and if your desktop already uses one, the app tells you when it starts. There are new `--snip` and `--hide` commands too, for binding in your desktop's keyboard settings.
+- **Every new snip is copied to the clipboard** as a PNG, ready to paste (`copy_snips`). Large snips are sent in pieces.
+- **The look settings work on Linux:** colors, solid, dashed or dotted frames, and frame thickness. `--reload` applies them to the notes already open.
+- Skipping websites is still Windows-only.
+
 ## 0.3.0 (2026-10-23)
 
 **Download:** `DontForget-windows-x86_64.exe` for Windows 10/11 (x64), or `DontForget-linux-x86_64` for Linux on X11 (x64, glibc 2.35+). One file each, no install. Windows may warn that the app is from an unknown publisher, because it isn't code-signed. Click *More info*, then *Run anyway*.

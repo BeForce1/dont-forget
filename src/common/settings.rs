@@ -132,6 +132,7 @@ impl Settings {
         s
     }
 
+    #[cfg_attr(not(windows), allow(dead_code))] // Linux has no settings UI that writes the file
     pub fn save(&self) {
         let after = match self.after {
             After::Follow => "follow",
