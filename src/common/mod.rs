@@ -3,7 +3,8 @@
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod anim;
 pub mod games;
-#[cfg_attr(not(windows), allow(dead_code))]
+pub mod keys;
 pub mod settings;
 #[cfg_attr(not(windows), allow(dead_code))]
 pub mod sites;
+pub mod store;

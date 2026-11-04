@@ -3,11 +3,10 @@ mod hook;
 mod note;
 mod overlay;
 mod sites;
-mod store;
 
 use hook::*;
 use note::{Kind, Mode, Saved};
-use crate::common::{anim, settings::{self, After, Outline, Settings, PRESETS}};
+use crate::common::{anim, keys, settings::{self, After, Outline, Settings, PRESETS}, store};
 use std::{
     cell::RefCell,
     collections::HashSet,
@@ -258,22 +257,16 @@ fn apply_settings(s: &Settings) {
 
 /// "Ctrl+Alt+S" -> (MOD_* flags, virtual key). Keys: letters, digits, F1-F24.
 fn parse_hotkey(text: &str) -> Option<(u32, u32)> {
-    let (mut mods, mut key) = (0, None);
-    for part in text.split('+').map(|p| p.trim().to_ascii_uppercase()) {
-        match part.as_str() {
-            "CTRL" | "CONTROL" => mods |= MOD_CONTROL,
-            "ALT" => mods |= MOD_ALT,
-            "SHIFT" => mods |= MOD_SHIFT,
-            "WIN" => mods |= MOD_WIN,
-            k if k.len() == 1 && k.chars().all(|c| c.is_ascii_alphanumeric()) => key = Some(k.as_bytes()[0] as u32),
-            k if k.starts_with('F') => match k[1..].parse::<u32>() {
-                Ok(n @ 1..=24) => key = Some(VK_F1 as u32 + n - 1),
-                _ => return None,
-            },
-            _ => return None,
-        }
-    }
-    Some((mods, key?))
+    let s = keys::parse(text)?;
+    let mods = [(s.ctrl, MOD_CONTROL), (s.alt, MOD_ALT), (s.shift, MOD_SHIFT), (s.win, MOD_WIN)]
+        .iter()
+        .filter(|m| m.0)
+        .fold(0, |acc, m| acc | m.1);
+    let vk = match s.key {
+        keys::Key::Char(c) => c as u32,
+        keys::Key::F(n) => VK_F1 as u32 + n as u32 - 1,
+    };
+    Some((mods, vk))
 }
 
 /// (Re-)registers the shortcuts from the settings; returns the ones another app already holds.

@@ -1,6 +1,6 @@
 // Saved notes: one PNG per note plus notes.ini, which lists where each open note sits and the
-// deleted ones still kept for undo. Lives next to settings.ini, in %APPDATA%\DontForget\notes.
-use super::note::{Kind, Saved};
+// deleted ones still kept for undo. Lives next to settings.ini, in a "notes" folder
+// (%APPDATA%\DontForget\notes on Windows, ~/.config/dont-forget/notes on Linux).
 use crate::common::settings;
 use std::{
     collections::HashSet,
@@ -9,6 +9,24 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+/// Left-to-right snip, or a right-to-left one that was added to the stack. Picks the frame color.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Kind {
+    Snip,
+    Add,
+}
+
+/// What it takes to bring a note back: the image file is `<id>.png`, (x, y) is the image's top-left.
+#[derive(Clone, Copy)]
+pub struct Saved {
+    pub id: u64,
+    pub x: i32,
+    pub y: i32,
+    pub scale: f32,
+    pub opacity: u32,
+    pub kind: Kind,
+}
 
 /// Deleted notes kept for undo, counted across all groups.
 pub const MAX_TRASH: usize = 20;

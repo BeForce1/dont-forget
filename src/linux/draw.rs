@@ -1,9 +1,19 @@
 // Client-side drawing straight into the X server's 32-bit BGRX layout. Shapes are anti-aliased
 // with signed distance functions, which covers everything a note needs without a 2D library.
+use crate::common::settings::Outline;
 
-pub const BORDER: i32 = 2;
 const IMAGE_RADIUS: f32 = 6.0;
 pub const WINDOW_RADIUS: i32 = 8;
+/// What shows between the dashes of a dashed or dotted frame.
+const GAP_COLOR: u32 = 0x1C1C1E;
+
+/// How a note's frame looks.
+#[derive(Clone, Copy)]
+pub struct Frame {
+    pub color: u32, // 0xRRGGBB
+    pub width: i32,
+    pub outline: Outline,
+}
 
 /// 0xRRGGBB (as in the settings file) -> (r, g, b).
 pub fn split(rgb: u32) -> (u8, u8, u8) {
@@ -21,6 +31,15 @@ pub struct Image {
 impl Image {
     pub fn new(w: u32, h: u32, color: u32) -> Image {
         Image { w, h, px: vec![color; (w * h) as usize] }
+    }
+
+    pub fn from_pixels(w: u32, h: u32, px: Vec<u32>) -> Image {
+        assert_eq!(px.len(), (w * h) as usize);
+        Image { w, h, px }
+    }
+
+    pub fn pixels(&self) -> &[u32] {
+        &self.px
     }
 
     pub fn width(&self) -> u32 {
@@ -94,9 +113,9 @@ fn segment_dist(px: f32, py: f32, (ax, ay): (f32, f32), (bx, by): (f32, f32)) ->
     (px - ax - t * dx).hypot(py - ay - t * dy)
 }
 
-/// Close button rect (x, y, size) for a note of the given client size.
-pub fn close_rect(w: i32, _h: i32) -> (i32, i32, i32) {
-    let (size, margin) = (22, BORDER + 6);
+/// Close button rect (x, y, size) for a note of the given client size and frame width.
+pub fn close_rect(w: i32, _h: i32, border: i32) -> (i32, i32, i32) {
+    let (size, margin) = (22, border + 6);
     (w - margin - size, margin, size)
 }
 
@@ -105,21 +124,23 @@ pub fn has_room_for_close(w: i32, h: i32) -> bool {
 }
 
 /// Renders a note: colored frame, the snip with rounded corners, and the × button when hovered.
-pub fn render_note(image: &Image, w: i32, h: i32, edge: (u8, u8, u8), show_close: bool, close_hot: bool) -> Image {
+pub fn render_note(image: &Image, w: i32, h: i32, frame: Frame, show_close: bool, close_hot: bool) -> Image {
     let (w, h) = (w.max(1), h.max(1));
-    let mut out = Image::new(w as u32, h as u32, (edge.0 as u32) << 16 | (edge.1 as u32) << 8 | edge.2 as u32);
-    let (b, iw, ih) = (BORDER as f32, (w - 2 * BORDER) as f32, (h - 2 * BORDER) as f32);
+    let border = frame.width;
+    let solid = frame.outline == Outline::Solid;
+    let mut out = Image::new(w as u32, h as u32, if solid { frame.color } else { GAP_COLOR });
+    let (b, iw, ih) = (border as f32, (w - 2 * border) as f32, (h - 2 * border) as f32);
     let (sx, sy) = (image.w as f32 / iw, image.h as f32 / ih);
     let exact = image.w as f32 == iw && image.h as f32 == ih;
-    for y in BORDER..h - BORDER {
-        for x in BORDER..w - BORDER {
+    for y in border..h - border {
+        for x in border..w - border {
             let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
             let cover = 0.5 - rounded_rect_dist(cx, cy, b, b, iw, ih, IMAGE_RADIUS);
             if cover <= 0.0 {
                 continue;
             }
             let color = if exact {
-                let p = image.px[((y - BORDER) as u32 * image.w + (x - BORDER) as u32) as usize];
+                let p = image.px[((y - border) as u32 * image.w + (x - border) as u32) as usize];
                 [(p >> 16 & 255) as f32, (p >> 8 & 255) as f32, (p & 255) as f32]
             } else {
                 image.sample((cx - b) * sx, (cy - b) * sy)
@@ -127,8 +148,14 @@ pub fn render_note(image: &Image, w: i32, h: i32, edge: (u8, u8, u8), show_close
             out.blend(x, y, color, cover);
         }
     }
+    if !solid {
+        // centered on the frame, following the window's rounded corners
+        let half = b / 2.0;
+        let (wf, hf) = (w as f32, h as f32);
+        dashed_outline(&mut out, rgb(split(frame.color)), b, frame.outline, (half, half, wf - b, hf - b), WINDOW_RADIUS as f32 - half);
+    }
     if show_close && has_room_for_close(w, h) {
-        let (x0, y0, s) = close_rect(w, h);
+        let (x0, y0, s) = close_rect(w, h, border);
         let (fx, fy, fs) = (x0 as f32, y0 as f32, s as f32);
         let (bg, bg_alpha) = if close_hot { ((229, 72, 77), 245.0) } else { ((35, 35, 38), 224.0) };
         let ring_alpha = if close_hot { 0.0 } else { 85.0 / 255.0 };
@@ -149,6 +176,70 @@ pub fn render_note(image: &Image, w: i32, h: i32, edge: (u8, u8, u8), show_close
         }
     }
     out
+}
+
+/// The point at distance `s` along a rounded rectangle's outline, clockwise from the top-left
+/// end of the top edge.
+fn outline_point(s: f32, (x, y, w, h): (f32, f32, f32, f32), r: f32) -> (f32, f32) {
+    let (sw, sh, arc) = (w - 2.0 * r, h - 2.0 * r, std::f32::consts::FRAC_PI_2 * r);
+    // (straight length, start point, direction), then a quarter arc around `center` from `angle`
+    let sides = [
+        (sw, (x + r, y), (1.0, 0.0), (x + w - r, y + r), -90f32),
+        (sh, (x + w, y + r), (0.0, 1.0), (x + w - r, y + h - r), 0.0),
+        (sw, (x + w - r, y + h), (-1.0, 0.0), (x + r, y + h - r), 90.0),
+        (sh, (x, y + h - r), (0.0, -1.0), (x + r, y + r), 180.0),
+    ];
+    let mut s = s;
+    for (len, (px, py), (dx, dy), (cx, cy), angle) in sides {
+        if s <= len {
+            return (px + dx * s, py + dy * s);
+        }
+        s -= len;
+        if s <= arc {
+            let a = (angle + s / arc * 90.0).to_radians();
+            return (cx + r * a.cos(), cy + r * a.sin());
+        }
+        s -= arc;
+    }
+    (x + r, y)
+}
+
+/// Strokes a dashed or dotted rounded-rectangle outline with round caps. The dash period is
+/// stretched a little so the pattern closes without a seam.
+fn dashed_outline(out: &mut Image, color: [f32; 3], width: f32, style: Outline, rect: (f32, f32, f32, f32), r: f32) {
+    let r = r.max(0.0).min(rect.2 / 2.0).min(rect.3 / 2.0);
+    let perimeter = 2.0 * (rect.2 + rect.3 - 4.0 * r) + std::f32::consts::TAU * r;
+    // (length of each dash's core, period); round caps add width/2 to each end
+    let (on, period) = match style {
+        Outline::Dashed => (2.0 * width, 5.0 * width),
+        _ => (0.0, 2.0 * width),
+    };
+    let n = (perimeter / period).round().max(1.0);
+    let period = perimeter / n;
+    let mut cover = vec![0f32; (out.w * out.h) as usize];
+    let rad = width / 2.0;
+    for dash in 0..n as u32 {
+        let start = dash as f32 * period;
+        let steps = (on / 0.5).ceil() as u32;
+        for i in 0..=steps {
+            let (px, py) = outline_point(start + on * i as f32 / steps.max(1) as f32, rect, r);
+            let (x0, x1) = ((px - rad - 1.0).floor().max(0.0) as i32, ((px + rad + 1.0).ceil() as i32).min(out.w as i32 - 1));
+            let (y0, y1) = ((py - rad - 1.0).floor().max(0.0) as i32, ((py + rad + 1.0).ceil() as i32).min(out.h as i32 - 1));
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let d = (x as f32 + 0.5 - px).hypot(y as f32 + 0.5 - py);
+                    let c = &mut cover[(y as u32 * out.w + x as u32) as usize];
+                    *c = c.max((rad + 0.5 - d).clamp(0.0, 1.0));
+                }
+            }
+        }
+    }
+    for y in 0..out.h as i32 {
+        for x in 0..out.w as i32 {
+            let c = cover[(y as u32 * out.w + x as u32) as usize];
+            out.blend(x, y, color, c);
+        }
+    }
 }
 
 /// Pixels as the X server's 32bpp BGRX bytes.

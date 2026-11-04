@@ -22,7 +22,7 @@
 
 Every new snip is also on the clipboard, ready to paste with Ctrl+V (turn off with `copy_snips=0`).
 
-**Your notes are kept.** Close the app, restart Windows or sign out, and your notes come back where they were. If a screen is gone by then, they move onto one you still have.
+**Your notes are kept.** Close the app, restart your computer or sign out, and your notes come back where they were. If a screen is gone by then, they move onto one you still have.
 
 **Games are left alone.** In games (anything Windows recognizes as a game, anything installed in a Steam, Epic, GOG, Xbox, Riot, Ubisoft, EA or Rockstar library, or a full-screen DirectX game) your mouse wheel works exactly as the game expects. You can switch Don't Forget back on for a specific game in the control panel.
 
@@ -60,13 +60,13 @@ Everything is in one text file: `%APPDATA%\DontForget\settings.ini` on Windows, 
 | `snip_color`, `add_color` | `#FFB400`, `#9B7BFF` | Frame colors of left-to-right and right-to-left snips. |
 | `outline` | `solid` | `solid`, `dashed` or `dotted`. |
 | `outline_width` | `2` | Frame thickness, 1 to 6 pixels (at 100% display scaling). |
-| `snip_key`, `hide_key`, `restore_key` | `Ctrl+Alt+S`, `Ctrl+Alt+H`, `Ctrl+Alt+Z` | Keyboard shortcuts: any of Ctrl, Alt, Shift, Win plus a letter, digit or F1–F24. Leave one empty to turn it off. |
+| `snip_key`, `hide_key`, `restore_key` | `Ctrl+Alt+S`, `Ctrl+Alt+H`, `Ctrl+Alt+Z` | Keyboard shortcuts: any of Ctrl, Alt, Shift, Win (Super on Linux) plus a letter, digit or F1–F24. Leave one empty to turn it off. |
 | `ignored_apps` | `SLDWORKS,blender,FreeCAD,acad` | Process names where the wheel is left alone. |
 | `ignored_sites` | | Websites where it's off, e.g. `youtube.com,github.com/settings`. |
 | `block_games` | `1` | Stay out of games unless they're listed in `allowed_games`. |
 | `allowed_games` | | Games where it works anyway. |
 
-**Where your notes are stored:** each note is a PNG in `%APPDATA%\DontForget\notes`, next to `notes.ini`, which lists where each one sits. The last 20 deleted notes are kept there too, for undo. Nothing leaves your computer.
+**Where your notes are stored:** each note is a PNG in `%APPDATA%\DontForget\notes` (`~/.config/dont-forget/notes` on Linux), next to `notes.ini`, which lists where each one sits. The last 20 deleted notes are kept there too, for undo. Nothing leaves your computer.
 
 ## Control panel (Windows)
 
@@ -77,14 +77,17 @@ Double-click `control.cmd` (needs PowerShell 7, and comes with the source code) 
 It runs in the background of your X session and is controlled from the terminal:
 
 ```
-dont-forget            start
-dont-forget --status   is it running, how many notes
-dont-forget --clear    delete all notes
-dont-forget --reload   re-read the settings file
-dont-forget --quit     stop it
+dont-forget             start
+dont-forget --status    is it running, how many notes
+dont-forget --snip      snip now: drag with the left button
+dont-forget --hide      hide all notes, or show them again
+dont-forget --restore   bring back the last deleted note
+dont-forget --clear     delete all notes (--restore brings them back)
+dont-forget --reload    re-read the settings file (changes apply right away)
+dont-forget --quit      stop it (notes are kept)
 ```
 
-Games are detected by their library folders, including Steam games running through Proton. Colors come from the settings file. Kept notes, undo, the keyboard shortcuts, dashed frames and website skipping are Windows-only for now.
+Kept notes, undo, the keyboard shortcuts, hiding notes, copying to the clipboard and the look settings all work as on Windows. If your desktop already uses one of the shortcuts, the app says so when it starts. You can then pick another key in the settings file, or bind `dont-forget --snip` to a key in your desktop's keyboard settings. Games are detected by their library folders, including Steam games running through Proton. Skipping websites is Windows-only for now, because browsers on Linux don't share the page address with other apps. On Linux, a note is deleted with a wheel click or its × button, a right click switches it between following and pinned, and scrolling on it resizes it.
 
 ## Uninstall
 
@@ -104,7 +107,7 @@ Run `cargo build --release` with Rust. On Windows, the `x86_64-pc-windows-gnu` t
 | **Mouse** | Any mouse with a clickable scroll wheel (middle button), or a touchpad with the keyboard shortcut. | A mouse with a clickable scroll wheel. |
 | **CPU** | Any 64-bit processor. 0% while idle. | Same, 0% while idle. |
 | **Memory** | About 2 MB idle, or about 3 MB with a websites list, which loads UI Automation. | About 3 MB resident idle. |
-| **Disk** | One exe of about 400 KB, with nothing to install. Saved notes take about as much as PNG screenshots of the same size. | One binary of about 590 KB. |
+| **Disk** | One exe of about 400 KB, with nothing to install. Saved notes take about as much as PNG screenshots of the same size. | One binary of about 700 KB. Saved notes as on Windows. |
 | **Extras** | PowerShell 7 for the optional control panel. | None. |
 
 Each open note holds its snip as an uncompressed image, so it adds roughly width × height × 4 bytes. An 800×500 snip adds about 1.6 MB.
